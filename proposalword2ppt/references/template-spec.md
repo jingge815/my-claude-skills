@@ -28,7 +28,7 @@
 | `cover` | slide1 | 标题幻灯片 | 封面 |
 | `accumulation` | slide2 | 图表在左（大）、文字在右、总结通栏 | 第 2 页 编译领域积累（核心考核页） |
 | `text-left` | slide3 | 文字在左、图表在右 | 第 3 页 需求分析、第 4 页 研究现状 |
-| `figure-left` | slide5 | 图表在左、文字在右 | 第 5 页起的所有正文页（概述、内容、路线、指标、成果、周期、经费） |
+| `figure-left` | slide5 | 图表在左、文字在右 | 第 5 页起的所有正文页（概述、研究内容、指标、成果、周期、经费） |
 | `closing` | slide16 | 总结 + 感谢语 + ISCAS 标识 | 结束语 |
 
 模板里 slide 6–15 与 slide 5 几何完全相同，slide 8/9/10/11 是「研究内容三、技术路线三」，
@@ -42,7 +42,7 @@
 |---|---|---|---|---|
 | 标题 | `标题 1` | (4.23, 3.12) | 25.4 × 6.63 | 脚本写成**微软雅黑 44 磅居中**（不继承占位符的 60 磅） |
 | 副标题 | `副标题 2` | (4.23, 10.01) | 25.4 × 4.60 | 居中、继承 24 磅；未提供副标题时整块删除 |
-| 报告人/单位/日期 | `文本框 3` | 模板 (26.66, 15.93) 5.94 × 1.80；**脚本改为 (21.20, 14.75) 11.40 × 3.35** | 右下角三行：`报告人：xxx` / `中国科学院软件研究所` / `xxxx年xx月xx日`。模板原框装不下 20 磅三行；单位行用 `org` 覆盖，默认「中国科学院软件研究所」 |
+| 报告人/单位/日期 | `文本框 3` | 模板 (26.66, 15.93) 5.94 × 1.80；**脚本改为 (21.20, 13.85) 11.40 × 4.25** | 右下角四行：`报告人：xxx` / `中国科学院软件研究所` / `职位：xxx` / `xxxx年xx月xx日`。模板原框装不下；单位行用 `org` 覆盖，职位用 `position` |
 
 ### accumulation（模板 slide2）
 
@@ -145,33 +145,56 @@
 
 | kind | 必填 | 选填 |
 |---|---|---|
-| `cover` | `title` | `subtitle`、`presenter`、`date`、`org`（默认「中国科学院软件研究所」） |
+| `cover` | `title` | `subtitle`、`presenter`、`position`（职位，按本项目材料写）、`date`、`org`（默认「中国科学院软件研究所」） |
 | `accumulation` / `text-left` / `figure-left` | `title` | `heading`、`points`、`summary`、`figure` |
 | `closing` | — | `title`（默认「结束语」）、`summary`、`thanks`（默认「感谢各位评审专家！」） |
 
-- `points` 每项写「标签：说明」，脚本会把标签渲染成带下划线的 run、冒号后半部分渲染成普通 run。
+- `points` 每项可以是字符串「标签：说明」，或对象 `{"label", "text", "subs"}`。
+  `label` 渲染成带下划线的一级标题，`subs` 每条渲染成缩进的二级行，最多 3 条。
   同页要么全部带标签，要么全部不带，不要混排。
-- `figure` 是**图表对象**（`type` + 数据），不是一句配图说明。契约与按页选型见
-  `references/figure-spec.md`。脚本调用 `shapes.py` 生成原生形状后插进图表槽。
+- `figure` 是一个图表对象，或最多 3 个对象的数组，不是一句配图说明。
+  多个对象时脚本把图表槽切开，每组各画一张。契约与按页选型见 `references/figure-spec.md`。
   不填、或绘制失败，才退回模板的「图/表」占位——退回结果不算成品。
 - 缺字段会被清空，模板里的「xxx」「1，2句话总结。」绝不会残留到成品。
 
 ## 七、脚本用法
+
+七个脚本按流程顺序排。两道门禁（`audit_process` / `audit_quality`）退出码 2 表示有阻塞项，
+**不通过不许往下走**，详见 `references/review-spec.md`。
 
 ```bash
 # 1）抽取申请书正文（.docx）
 python3 scripts/extract_doc.py --input 申请书.docx --out 申请书.md
 python3 scripts/extract_doc.py --input 申请书.docx --headings-only   # 只看章节标题，做映射用
 
-# 2）生成 PPT（旁白写进备注页）
+# 2）收素材：申请书与团队资料里的图片、表格全部收出来（不许跳过）
+python3 scripts/collect_assets.py --input 申请书.docx 团队资料/ --out-dir work/assets
+
+# 3）图表规划：先看模板图槽实测尺寸，再生成规划骨架，逐槽填 source/type/purpose
+python3 scripts/plan_figures.py --slots
+python3 scripts/plan_figures.py --pages 14 --assets work/assets/index.json \
+        --out work/figure-plan.json
+
+# 4）门禁 A：过程审查（画图之前）
+python3 scripts/audit_process.py --assets work/assets/index.json --plan work/figure-plan.json
+
+# 5）生成 PPT（旁白写进备注页）
 python3 scripts/build_ppt.py --content content.json --out 答辩PPT-项目简称-YYYYMMDD.pptx \
         --narration-out 旁白稿-项目简称-YYYYMMDD.md
+
+# 6）门禁 B：质量审查（生成之后）
+python3 scripts/audit_quality.py --pptx 答辩PPT-项目简称-YYYYMMDD.pptx --content content.json
+
+# 7）逐页出预览图，肉眼核对版式（没看过的页不算完成）
+python3 scripts/preview_slides.py --pptx 答辩PPT-项目简称-YYYYMMDD.pptx --out-dir work/preview
 ```
 
 输出：pptx + 逐页校验报告（要点条数/字数、总结字数、旁白字数与估算时长）。
 脚本仅重置被填充形状的 `txBody`，模板其余部分逐字节保留。
-`shapes.py` 只有嵌申请书原图（`render_image`）和出自查预览图（`to_preview_png`）
-用到 Pillow；自己画的图生成原生形状，不需要它。
+`shapes.py` 只有嵌原图（`render_image`）和出自查预览图（`to_preview_png`）用到 Pillow；
+自己画的图生成原生形状，不需要它。`audit_quality.py` 算正文折行要 Pillow 加一个中文字体，
+两者缺一就退回近似估算并在报告里标明。`preview_slides.py` 有 LibreOffice 时走
+`soffice + pdftoppm`（最接近 PowerPoint 实际效果），没有就用 Pillow 出近似预览。
 
 ## 八、脚本对模板做的调整（如实列出）
 
@@ -188,6 +211,22 @@ python3 scripts/build_ppt.py --content content.json --out 答辩PPT-项目简称
 5. **删除**：`ppt/changesInfos/`、`docProps/thumbnail.jpeg`、`_rels/.rels` 中对应关系。
 6. **备注页**：模板只为第 2–15 页建了空白备注页，脚本为**每一页**都建备注页并写入旁白。
 7. **自动页码**：由版式提供，页序变化后自动重排，无需处理。
+
+## 八之二、允许调整文本框几何的范围
+
+文字放不下时，**拓宽文本框是允许的一步**（处理阶梯见 `review-spec.md` 第四节），
+但不是随便拉：版式是模板定的，改大了就会压到图或撞上总结框。能动的只有下面这些，
+动过要记进生成说明：
+
+| 可调 | 范围 | 硬约束 |
+|---|---|---|
+| 正文框宽度 | 向右最多到图表槽左沿减 0.3 cm | 不得与图表槽相交（质量审查第 2 条会查） |
+| 正文框高度 | 上沿不高于图表槽上沿，下沿不低于总结框上沿减 0.3 cm | 不得盖住总结框与页码 |
+| 正文字号 | 一级 18→16，二级 16→14，下限 12 磅 | 低于 12 磅直接判不合格 |
+| 图内字号 | 18→14 磅 | 低于 14 磅先缩短文字或换图型 |
+
+**不能动的**：总结框高度（1.13 cm，下面紧挨页码，加高必撞）、封面标题位置与字号档位、
+版式提供的背景/标识/页码、模板配色与字体族。这些要改就是改模板，不是改单页。
 
 ## 九、改模板时的注意事项
 

@@ -105,10 +105,20 @@ def load_rels(zf):
 
 
 def para_blips(p):
+    """找一段里引用的图片。
+
+    docx 有两种写法：新格式用 <a:blip r:embed>，老格式（Word 2003 兼容）用
+    <v:imagedata r:id>。只认前一种会把申请书里的架构图整张漏掉，而且不报错。
+    """
     embeds = []
-    for blip in p.iter(A + "blip"):
-        embed = blip.get(R + "embed")
-        if embed:
+    for el in p.iter():
+        if el.tag == A + "blip":
+            embed = el.get(R + "embed")
+        elif el.tag == "{urn:schemas-microsoft-com:vml}imagedata":
+            embed = el.get(R + "id")
+        else:
+            continue
+        if embed and embed not in embeds:
             embeds.append(embed)
     return embeds
 
@@ -193,6 +203,22 @@ def extract(path, media_dir=None):
                 n = os.path.basename(dest)
                 lines.append("![申请书配图 %s](%s)" % (n, dest))
                 lines.append("")
+
+    # 正文之外（页眉、页脚、脚注、文本框）也可能嵌图。按 word/media/ 的实际文件数核对，
+    # 少了就停下来，不把漏掉的图静默丢掉。
+    if media_dir:
+        media_files = [n for n in zf.namelist() if n.startswith("word/media/")]
+        found = {t for t in saved}
+        missing = [n for n in media_files if n.replace("\\", "/") not in found]
+        if missing:
+            for target in missing:
+                img_index_holder[0] += 1
+                dest = save_image(zf, target, media_dir, img_index_holder[0])
+                saved[target] = dest
+            lines.append("")
+            lines.append("注意：以下图片不在正文段落里，是从 word/media/ 补抽的：")
+            for target in missing:
+                lines.append("- %s -> %s" % (target, saved.get(target)))
 
     if saved:
         lines.append("")

@@ -34,17 +34,34 @@ except ImportError:
 # --------------------------------------------------------------------------
 # 模板槽位定义（名称取自 template.pptx 中各形状的 cNvPr name，改动模板需同步改这里）
 # --------------------------------------------------------------------------
-BLUEPRINTS = {
-    "cover": 1,          # 封面：标题/副标题占位符 + 右下角报告人文本框
-    "accumulation": 2,   # 积累页：图表在左、文字在右、底部总结
-    "text-left": 3,      # 左文右图（需求分析、研究现状）
-    "figure-left": 5,    # 左图右文（研究概述、研究内容、技术路线、指标、成果、周期、经费）
-    "closing": 16,       # 结束语：总结 + 感谢语 + ISCAS 标识
+# 新模板是 14 页定稿，每一页的槽位位置和数量都不一样，按页码取，不再按 kind 共用一张蓝图。
+# 研究内容多于两项时，超出的页复用第 8、9 页的版式。
+PAGE_BLUEPRINT = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
+                  10: 10, 11: 11, 12: 12, 13: 13, 14: 14}
+BLUEPRINTS = {"cover": 1, "accumulation": 2, "text-left": 3, "figure-left": 5, "closing": 14}
+# 每页的正文槽、总结槽、图槽（按模板里标注的图序号）。图槽坐标以模板为准，不再切分。
+PAGE_SLOTS = {
+    2:  {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 2", "矩形 4", "矩形 8", "矩形 12"]},
+    3:  {"body": "文本框 31", "summary": None,       "figures": ["矩形 5", "矩形 9", "矩形 13"]},
+    4:  {"body": "文本框 31", "summary": None,       "figures": ["矩形 2", "矩形 8"]},
+    5:  {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 2"]},
+    6:  {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 2"]},
+    7:  {"body": "文本框 6",  "summary": "文本框 33", "figures": ["矩形 2"]},
+    8:  {"body": "文本框 4",  "summary": "文本框 33", "figures": ["矩形 6"]},
+    9:  {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 3"]},
+    10: {"body": "文本框 3",  "summary": "文本框 33", "figures": ["矩形 5"]},
+    11: {"body": "文本框 3",  "summary": "文本框 33", "figures": ["矩形 5"]},
+    12: {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 3"]},
+    13: {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 3"]},
 }
 SLOT_TITLE = "文本框 1"
 SLOT_FIGURE = "矩形 2"
 SLOT_BODY = "文本框 31"
 SLOT_SUMMARY = "文本框 33"
+# 一级标题楷体 18 磅，二级楷体 16 磅，按模板段落的缩进，不再自适应缩放
+LEVEL1_PT = 18
+LEVEL2_PT = 16
+BODY_FACE = ("楷体", "楷体")
 FIG_PLACEHOLDER = "图/表"
 
 REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -54,8 +71,14 @@ XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
 MAX_POINTS = 6
 ACCUMULATION_POINTS = 4   # 第 2 页固定四栏：论文 / 项目 / 厂商 / 优化
 MAX_POINT_CHARS = 28
-# 研究现状要把「现状原理 + 对应不足」讲清楚，一条自然更长，单独放宽
+# 需求 / 现状 / 概述 / 研究内容要把「一级标题 + 不足 + 方法」写开，主句放宽
 STATUS_POINT_CHARS = 44
+# 二级行：不足、方法、原理，挂在一级标题下面
+SUB_CHARS = 24
+MAX_SUBS = 3
+SUB_PT_DROP = 2          # 二级行比一级标题小 2 磅
+SUB_INDENT_CM = 0.85     # 二级行在一级标题基础上再缩进
+MAX_FIGURES = 4           # 一页图数以模板槽位为准，模板最多四个矩形
 MAX_SUMMARY_CHARS = 60
 # 研究内容 / 技术路线 / 概述的总结句按模板写（问题+不足+方案 / 方法+对比+优势），
 # 本身就比普通判断句长
@@ -63,15 +86,22 @@ TEMPLATE_SUMMARY_CHARS = 74
 CLOSING_SUMMARY_CHARS = 90  # 结束语收尾句要写足单位优势，允许更长
 
 
+# 这些页允许一级标题下挂二级行，主句也按 44 字计
+LONG_POINT_KINDS = ("text-left", "figure-left")
+
+
 def point_char_limit(page):
-    return STATUS_POINT_CHARS if "研究现状" in (page.get("title") or "") else MAX_POINT_CHARS
+    title = page.get("title") or ""
+    if "研究现状" in title or page.get("kind") in LONG_POINT_KINDS:
+        return STATUS_POINT_CHARS
+    return MAX_POINT_CHARS
 
 
 def summary_char_limit(page):
     title = page.get("title") or ""
     if page.get("kind") == "closing":
         return CLOSING_SUMMARY_CHARS
-    if any(k in title for k in ("研究内容", "研究技术路线", "研究概述")):
+    if any(k in title for k in ("研究内容", "研究概述")):
         return TEMPLATE_SUMMARY_CHARS
     return MAX_SUMMARY_CHARS
 NARRATION_MIN = 1800
@@ -113,13 +143,13 @@ SUMMARY_TOP = {
     "text-left": 17.05,
     "figure-left": 17.05,
 }
-COVER_META_PT = 20        # 封面「报告人 / 日期」
-COVER_META_ORG_PT = 18    # 封面单位行，比姓名略小
-# 封面右下角文本框：模板只有 5.94 × 1.80 cm，三行放不下
+COVER_META_PT = 20        # 封面「报告人 / 职位 / 日期」
+COVER_META_ORG_PT = 20    # 封面四行统一 20 磅，单位行不再单独缩小
+# 封面右下角文本框：模板只有 5.94 × 1.80 cm，四行放不下，这里整体加高
 COVER_META_X = int(round(21.2 / CM_PER_EMU))
-COVER_META_Y = int(round(14.75 / CM_PER_EMU))
+COVER_META_Y = int(round(13.85 / CM_PER_EMU))
 COVER_META_CX = int(round(11.4 / CM_PER_EMU))
-COVER_META_CY = int(round(3.35 / CM_PER_EMU))
+COVER_META_CY = int(round(4.25 / CM_PER_EMU))
 # 图在左、字在右时，正文左沿按「图右沿 + 间隙」定，贴回图边。
 # 模板把正文放在 23.06，离图 4 cm，中间空一大条。
 FIGURE_RIGHT = {
@@ -231,11 +261,11 @@ def norm_lang(rpr):
     return rpr
 
 
-def build_paragraph(para_tpl, runs, sz=None, typeface=None):
+def build_paragraph(para_tpl, runs, sz=None, typeface=None, indent_cm=None):
     """克隆模板段落，替换其中的文本 run。
 
-    para_tpl: 模板 <a:p> 片段，提供 pPr（项目符号、行距、缩进）与 run/rPr 样式
-    runs: [(文本, 模板 run 序号)]，模板 run 序号按段落内 <a:r> 出现顺序取
+    indent_cm 给二级行用：在模板左缩进上再加一段，并取消悬挂缩进，
+    让二级行比一级标题整体向右缩一截。
     """
     rprs = []
     for run in RUN_RE.findall(para_tpl):
@@ -249,6 +279,15 @@ def build_paragraph(para_tpl, runs, sz=None, typeface=None):
     body = RUN_RE.sub("", para_tpl)
     if endpr:
         body = body.replace(endpr, "")
+
+    if indent_cm:
+        extra = int(round(indent_cm / CM_PER_EMU))
+        def bump(m):
+            mar = int(m.group(1)) + extra
+            return 'marL="%d" indent="0"' % mar
+        body = re.sub(r'marL="(\d+)"\s+indent="[-0-9]+"', bump, body, count=1)
+        if 'marL=' not in body:
+            body = body.replace("<a:p>", '<a:p><a:pPr marL="%d" indent="0"/>' % extra, 1)
 
     out_runs = []
     for text, idx in runs:
@@ -362,6 +401,53 @@ def split_point(text):
         if i > 0:
             return text[:i], text[i:]
     return None, text
+
+
+def normalize_point(point):
+    """要点统一成 {label, text, subs}。
+
+    旧写法是字符串「标签：说明」，继续接受。新写法是对象，subs 是挂在
+    一级标题下的二级行（不足、方法、原理），每条独立成段。
+    """
+    if isinstance(point, str):
+        label, rest = split_point(point)
+        return {"label": label, "text": rest if label else point, "subs": []}
+    if isinstance(point, dict):
+        label = (point.get("label") or "").strip() or None
+        text = point.get("text")
+        if text is None:
+            text = point.get("body") or ""
+        text = str(text).strip()
+        subs = []
+        for sub in (point.get("subs") or [])[:MAX_SUBS]:
+            line = sub.get("text") if isinstance(sub, dict) else sub
+            line = str(line or "").strip()
+            if line:
+                subs.append(line)
+        return {"label": label, "text": text, "subs": subs}
+    return {"label": None, "text": str(point), "subs": []}
+
+
+def point_text(point):
+    """校验和字数统计用的纯文本。"""
+    item = normalize_point(point)
+    parts = []
+    if item["label"]:
+        parts.append(item["label"] + "：" + item["text"])
+    elif item["text"]:
+        parts.append(item["text"])
+    parts.extend(item["subs"])
+    return "".join(parts)
+
+
+def normalize_figures(figure, limit=None):
+    """figure 可以是一个对象，也可以是一组对象。limit 用这一页模板的槽位数。"""
+    if figure is None or figure == "" or figure == FIG_PLACEHOLDER:
+        return []
+    if isinstance(figure, list):
+        figs = [f for f in figure if f not in (None, "", FIG_PLACEHOLDER)]
+        return figs[:limit] if limit else figs
+    return [figure]
 
 
 def page_title_size(text):
@@ -535,6 +621,32 @@ def replace_figure_with_shapes(xml, shape_xml):
     return xml.replace(block, shape_xml)
 
 
+def split_slot(xfrm, n):
+    """把图表槽切成 n 个子槽，返回的坐标是厘米。2 组上下分，3 组上一下二。"""
+    n = max(1, n)
+    x = xfrm["x"] * CM_PER_EMU
+    y = xfrm["y"] * CM_PER_EMU
+    cx = xfrm["cx"] * CM_PER_EMU
+    cy = xfrm["cy"] * CM_PER_EMU
+    if n == 1:
+        return [{"x": x, "y": y, "cx": cx, "cy": cy}]
+    gap = 0.30
+    if n == 2:
+        h = (cy - gap) / 2.0
+        return [
+            {"x": x, "y": y, "cx": cx, "cy": h},
+            {"x": x, "y": y + h + gap, "cx": cx, "cy": cy - h - gap},
+        ]
+    top_h = cy * 0.56
+    bot_h = cy - top_h - gap
+    half = (cx - gap) / 2.0
+    return [
+        {"x": x, "y": y, "cx": cx, "cy": top_h},
+        {"x": x, "y": y + top_h + gap, "cx": half, "cy": bot_h},
+        {"x": x + half + gap, "y": y + top_h + gap, "cx": cx - half - gap, "cy": bot_h},
+    ]
+
+
 def figure_caption(figure):
     if isinstance(figure, dict):
         return figure.get("caption") or figure.get("title") or ""
@@ -554,6 +666,8 @@ def build_slide(tpl_xml, page):
     title = page.get("title", "")
 
     if kind == "cover":
+        if not (page.get("subtitle") or "").strip():
+            page["subtitle"] = "重点实验室自主科研项目评审答辩"
         xml = fill_shape(
             tpl_xml,
             "标题 1",
@@ -571,6 +685,7 @@ def build_slide(tpl_xml, page):
         presenter = page.get("presenter", "")
         date = page.get("date", "")
         org = page.get("org", "中国科学院软件研究所")
+        position = (page.get("position") or "").strip()
         xml = set_shape_box(
             xml,
             "文本框 3",
@@ -579,17 +694,18 @@ def build_slide(tpl_xml, page):
             cx=COVER_META_CX,
             cy=COVER_META_CY,
         )
-        # 三行：报告人 / 单位 / 日期。单位行单独降 2 磅，视觉上收在姓名之下。
+        # 四行：报告人 / 单位 / 职位 / 日期。职位按本项目材料写，没给就空着并在校验里报。
         meta_specs = [
             (0, [("报告人：" + presenter, 0)]),
-            (0, [(org, 0)]),
+            (0, [("单位：" + org, 0)]),
+            (0, [("职位：" + position, 0)]),
             (1, [(date, 0)]),
         ]
         xml = fill_shape_mixed(
             xml,
             "文本框 3",
             meta_specs,
-            [COVER_META_PT, COVER_META_ORG_PT, COVER_META_PT],
+            [COVER_META_PT, COVER_META_PT, COVER_META_PT, COVER_META_PT],
             typeface=("楷体", "Times New Roman"),
         )
         xml = set_autofit(xml, "文本框 3", "noAutofit")
@@ -611,80 +727,96 @@ def build_slide(tpl_xml, page):
     # 正文页：积累 / 左文右图 / 左图右文
     xml = fill_shape(tpl_xml, SLOT_TITLE, [(0, [(title, 0)])], sz=page_title_size(title))
 
-    figure = page.get("figure")
-    pic_path = page.get("_figure_png")
-    canvas = page.get("_figure_shapes")
-    if canvas is not None and _shapes is not None:
-        # 自己画的图 → 原生形状，坐标以图表槽左上角为原点
-        block = find_shape(xml, SLOT_FIGURE)
+    # 图放进模板给这一页留的矩形里，一个矩形一张图，不切分、不重叠。
+    # 没画出来的矩形删掉，避免模板里的「图1」「图2」占位文字留在成品里。
+    slot_names = PAGE_SLOTS.get(page.get("_index"), {}).get("figures", [SLOT_FIGURE])
+    canvases = page.get("_figure_shapes") or []
+    pics = page.get("_figure_pics") or []
+    # 模板留了多个图槽但这一页只画一张时，把这张图铺满这些槽的外接矩形，
+    # 不要缩在其中一块里、旁边留着空白。
+    if len(canvases) + len(pics) == 1 and len(slot_names) > 1:
+        boxes = [shape_xfrm(find_shape(xml, name)) for name in slot_names]
+        boxes = [b for b in boxes if b]
+        if boxes:
+            x0 = min(b["x"] for b in boxes); y0 = min(b["y"] for b in boxes)
+            x1 = max(b["x"] + b["cx"] for b in boxes); y1 = max(b["y"] + b["cy"] for b in boxes)
+            union = {"x": x0, "y": y0, "cx": x1 - x0, "cy": y1 - y0}
+            for name in slot_names:
+                block = find_shape(xml, name)
+                if block:
+                    xml = xml.replace(block, "")
+            if canvases and _shapes is not None:
+                # 画布是按原槽尺寸排的，铺满前按合并后的尺寸重画一次
+                figs = normalize_figures(page.get("figure"))
+                spec = _shapes.normalize_figure(figs[0]) if figs else None
+                if spec:
+                    spec = dict(spec)
+                    spec["_w"] = union["cx"] * CM_PER_EMU
+                    spec["_h"] = union["cy"] * CM_PER_EMU
+                    redrawn = _shapes.render_shapes(spec)
+                    canvas = redrawn or canvases[0]
+                else:
+                    canvas = canvases[0]
+                # to_xml 的偏移单位是厘米，union 是 EMU
+                drawn = _shapes.to_xml(canvas, union["x"] * CM_PER_EMU, union["y"] * CM_PER_EMU,
+                                       image_rids=page.get("_image_rids"))
+                xml = xml.replace("</p:spTree>", drawn + "</p:spTree>", 1)
+            elif pics:
+                rid, descr = pics[0]
+                drawn = pic_xml(next_cNvPr_id(xml), "图表", rid, union, descr=descr)
+                xml = xml.replace("</p:spTree>", drawn + "</p:spTree>", 1)
+            canvases, pics = [], []
+    for n, name in enumerate(slot_names):
+        block = find_shape(xml, name)
         xfrm = shape_xfrm(block) if block is not None else None
-        if xfrm is not None:
-            xml = replace_figure_with_shapes(
-                xml,
-                _shapes.to_xml(canvas, xfrm["x"] * CM_PER_EMU, xfrm["y"] * CM_PER_EMU),
-            )
-    elif pic_path:
-        xml = replace_figure_with_pic(xml, page["_figure_rid"], descr=figure_caption(figure))
-    else:
-        caption = figure_caption(figure) or FIG_PLACEHOLDER
-        xml = fill_shape(
-            xml,
-            SLOT_FIGURE,
-            [(0, [(caption, 0)])],
-            sz=None if caption == FIG_PLACEHOLDER else 2000,
-        )
-
-    heading = page.get("heading")
-    points = page.get("points") or []
-    body_h_cm = 3.93
-    body_w_cm = BODY_WIDTH_CM
-    body_block = find_shape(xml, SLOT_BODY)
-    if body_block:
-        xfrm = shape_xfrm(body_block)
-        if xfrm:
-            aligned = align_body_and_figure(xfrm, kind)
-            xml = set_shape_box(
-                xml,
-                SLOT_BODY,
-                x=aligned["x"],
-                y=aligned["y"],
-                cx=aligned["cx"],
-                cy=aligned["cy"],
-            )
-            body_h_cm = aligned["h_cm"]
-            body_w_cm = aligned["w_cm"]
-    paras = ([heading] if heading else []) + list(points)
-    body_pt = fit_font_pt(
-        paras, body_w_cm, body_h_cm, BODY_PT_DEFAULT, BODY_PT_MIN, BODY_PT_MAX
-    )
-    heading_pt = min(BODY_PT_MAX, body_pt + 2)
-    page["_body_pt"] = body_pt
-
-    specs = []
-    if heading:
-        specs.append((0, [(heading, 0)]))
-    for point in points:
-        label, rest = split_point(point)
-        if label is None:
-            specs.append((1, [(rest, 1)]))
+        if xfrm is None:
+            continue
+        box = {"x": xfrm["x"] * CM_PER_EMU, "y": xfrm["y"] * CM_PER_EMU,
+               "cx": xfrm["cx"] * CM_PER_EMU, "cy": xfrm["cy"] * CM_PER_EMU}
+        if n < len(canvases) and _shapes is not None:
+            by_canvas = page.get("_image_rids_by_canvas") or []
+            rids = by_canvas[n] if n < len(by_canvas) else page.get("_image_rids")
+            xml = xml.replace(block, _shapes.to_xml(
+                canvases[n], box["x"], box["y"], image_rids=rids))
+        elif n - len(canvases) < len(pics) and n >= len(canvases):
+            rid, descr = pics[n - len(canvases)]
+            xml = xml.replace(block, pic_xml(next_cNvPr_id(xml), "图表", rid, xfrm, descr=descr))
         else:
-            specs.append((1, [(label, 0), (rest, 1)]))
-    if specs:
-        filled = []
-        heading_used = False
-        for ptpl, runs in specs:
-            sz = heading_pt if (ptpl == 0 and not heading_used) else body_pt
-            if ptpl == 0:
-                heading_used = True
-            filled.append((ptpl, runs, sz))
-        xml = fill_body(xml, filled)
-        xml = set_autofit(xml, SLOT_BODY, "noAutofit")
+            # 这一张画不出：矩形留着，占位文字换成「待补充」，不并进别的图
+            xml = fill_shape(xml, name, [(0, [("待补充", 0)])], sz=1800, typeface=BODY_FACE)
+
+    # 正文：一级标题楷体 18 磅、二级楷体 16 磅，缩进用模板段落自带的，不在这里重算。
+    slots = PAGE_SLOTS.get(page.get("_index"), {})
+    body_name = slots.get("body", SLOT_BODY)
+    points = [normalize_point(pt) for pt in (page.get("points") or [])]
+    page["_body_pt"] = LEVEL1_PT
+    body_paras = shape_paragraphs(find_shape(xml, body_name) or "")
+    lvl1 = next((i for i, para in enumerate(body_paras) if 'lvl="' not in para and "<a:r>" in para), 0)
+    lvl2_idx = next((i for i, para in enumerate(body_paras) if 'lvl="1"' in para), None)
+    # 模板这一页没有二级段落时，仍按前面页的二级缩进（2.06 cm）排，不能和一级对齐
+    lvl2 = lvl2_idx if lvl2_idx is not None else lvl1
+    sub_indent = 0 if lvl2_idx is not None else 1.27
+
+    filled = []
+    for item in points:
+        if item["label"] is None:
+            runs = [(item["text"], 0)]
+        else:
+            rest = ("：" + item["text"]) if item["text"] else ""
+            runs = [(item["label"], 0), (rest, 1 if item["text"] else 0)]
+        filled.append((lvl1, runs, LEVEL1_PT, 0))
+        for sub in item["subs"]:
+            filled.append((lvl2, [(sub, 0)], LEVEL2_PT, sub_indent))
+    if filled:
+        xml = fill_body(xml, filled, body_name, BODY_FACE)
+        xml = set_autofit(xml, body_name, "noAutofit")
     else:
-        xml = clear_shape(xml, SLOT_BODY)
+        xml = clear_shape(xml, body_name)
 
     summary = page.get("summary")
-    if summary:
-        sum_block = find_shape(xml, SLOT_SUMMARY)
+    summary_name = PAGE_SLOTS.get(page.get("_index"), {}).get("summary", SLOT_SUMMARY)
+    if summary and summary_name:
+        sum_block = find_shape(xml, summary_name)
         sum_w, sum_h = 30.55, 1.13
         if sum_block:
             xfrm = shape_xfrm(sum_block)
@@ -695,10 +827,10 @@ def build_slide(tpl_xml, page):
         # 所以总结句要写成一句话、一行放下；太长就降字号，并在校验里提示回去改短。
         sum_pt = fit_font_pt([summary], sum_w, sum_h, SUMMARY_PT_DEFAULT, SUMMARY_PT_MIN)
         page["_summary_pt"] = sum_pt
-        xml = fill_shape(xml, SLOT_SUMMARY, [(0, [(summary, 0)])], sz=sum_pt * 100)
-        xml = set_autofit(xml, SLOT_SUMMARY, "noAutofit")
-    else:
-        xml = clear_shape(xml, SLOT_SUMMARY)
+        xml = fill_shape(xml, summary_name, [(0, [(summary, 0)])], sz=sum_pt * 100, typeface=BODY_FACE)
+        xml = set_autofit(xml, summary_name, "noAutofit")
+    elif summary_name:
+        xml = clear_shape(xml, summary_name)
     return xml
 
 
@@ -736,17 +868,18 @@ def align_body_and_figure(body_xfrm, kind):
     }
 
 
-def fill_body(xml, filled):
-    """filled: [(模板段落序号, runs, 磅), ...]"""
-    block = find_shape(xml, SLOT_BODY)
+def fill_body(xml, filled, body_name=None, typeface=None):
+    """filled: [(模板段落序号, runs, 磅, 额外缩进cm), ...]"""
+    body_name = body_name or SLOT_BODY
+    block = find_shape(xml, body_name)
     if block is None:
-        raise KeyError("模板中找不到形状：%s" % SLOT_BODY)
+        raise KeyError("模板中找不到形状：%s" % body_name)
     paras = shape_paragraphs(block)
     if not paras:
-        raise KeyError("形状 %s 没有段落模板" % SLOT_BODY)
+        raise KeyError("形状 %s 没有段落模板" % body_name)
     new = "".join(
-        build_paragraph(paras[min(ptpl, len(paras) - 1)], runs, sz * 100, None)
-        for ptpl, runs, sz in filled
+        build_paragraph(paras[min(ptpl, len(paras) - 1)], runs, sz * 100, typeface, indent)
+        for ptpl, runs, sz, indent in filled
     )
     body = TXBODY_RE.search(block).group(0)
     open_tag = body[: body.index("<a:p>")] if "<a:p>" in body else body[: -len("</p:txBody>")]
@@ -895,18 +1028,53 @@ def build(content, template_path, out_path, narration_out=None):
         kind = page["kind"]
         if kind not in BLUEPRINTS:
             raise SystemExit('第 %d 页的 kind "%s" 不受支持，可选：%s' % (i, kind, "/".join(BLUEPRINTS)))
-        bp = BLUEPRINTS[kind]
+        bp = PAGE_BLUEPRINT.get(i, BLUEPRINTS[kind])
+        page["_index"] = i
 
-        fig_rid = None
-        fig_kind, fig_payload = prepare_figure(page, i, media_dir)
-        if fig_kind == "png" and fig_payload:
-            media_name = "generated_slide%d.png" % i
-            generated_media["ppt/media/" + media_name] = fig_payload
-            fig_rid = "rIdFig"
-            page["_figure_png"] = fig_payload
-            page["_figure_rid"] = fig_rid
-        elif fig_kind == "shapes":
-            page["_figure_shapes"] = fig_payload
+        # 图的尺寸取模板里这一页各个矩形的真实尺寸，画布按这个尺寸排，不再切分。
+        slots = []
+        for name in PAGE_SLOTS.get(i, {}).get("figures", []):
+            block = find_shape(tpl_slides[bp], name)
+            xfrm = shape_xfrm(block) if block is not None else None
+            if xfrm:
+                slots.append({"x": xfrm["x"] * CM_PER_EMU, "y": xfrm["y"] * CM_PER_EMU,
+                              "cx": xfrm["cx"] * CM_PER_EMU, "cy": xfrm["cy"] * CM_PER_EMU})
+        page["_slots"] = slots
+        prepared = prepare_figure(page, i, media_dir)
+        page["_figure_missing"] = prepared["missing"]
+        media_seq = []
+
+        def add_media(path):
+            media_seq.append(path)
+            name = "generated_slide%d_%d.png" % (i, len(media_seq))
+            generated_media["ppt/media/" + name] = path
+            return "rIdImg%d" % len(media_seq), name
+
+        for canvas, slot in zip(prepared["shapes"], page.get("_slots") or []):
+            if canvas.h > slot["cy"] + 0.05 or canvas.w > slot["cx"] + 0.05:
+                page.setdefault("_figure_missing", []).append(
+                    "图高 %.1fcm 超过子槽 %.1fcm，换更矮的图或减少层数" % (canvas.h, slot["cy"]))
+        # rid 映射按画布分开存：to_xml 里的图片下标是「这一个画布内」从 0 数的，
+        # 一页有多组图时用整页累计下标会让后面的画布取到前面画布的图。
+        image_rids_by_canvas = []
+        for canvas in prepared["shapes"]:
+            rids = {}
+            for img_i, path in enumerate(_shapes.canvas_images(canvas)):
+                rid, _name = add_media(path)
+                rids[img_i] = rid
+            image_rids_by_canvas.append(rids)
+        page["_image_rids_by_canvas"] = image_rids_by_canvas
+        page["_image_rids"] = image_rids_by_canvas[0] if image_rids_by_canvas else {}
+        page["_figure_shapes"] = prepared["shapes"]
+        page["_figure_pics"] = []
+        for path, descr in prepared["images"]:
+            rid, _name = add_media(path)
+            page["_figure_pics"].append((rid, descr))
+        # 只有一组原图、没有形状图时，走单图嵌入（保持原来的居中裁切）
+        if prepared["images"] and not prepared["shapes"] and len(prepared["images"]) == 1:
+            page["_figure_png"] = prepared["images"][0][0]
+            page["_figure_rid"] = page["_figure_pics"][0][0]
+            page["_figure_pics"] = []
 
         xml = build_slide(tpl_slides[bp], page)
         assert_xml_wellformed(xml, "第%d页" % i)
@@ -923,11 +1091,11 @@ def build(content, template_path, out_path, narration_out=None):
             items.append((rid, rtype, target))
         used = {rid for rid, _, _ in items}
         nid = 1
-        while ("rId%d" % nid) in used or ("rId%d" % nid) == fig_rid:
+        while ("rId%d" % nid) in used:
             nid += 1
         items.append(("rId%d" % nid, "notesSlide", "../notesSlides/notesSlide%d.xml" % i))
-        if fig_rid:
-            items.append((fig_rid, "image", "../media/%s" % ("generated_slide%d.png" % i)))
+        for seq, _path in enumerate(media_seq, start=1):
+            items.append(("rIdImg%d" % seq, "image", "../media/generated_slide%d_%d.png" % (i, seq)))
         out_slide_rels[i] = rels_doc(items)
 
         # 备注页：模板备注页 + 本页旁白，回指本页幻灯片
@@ -1033,44 +1201,61 @@ def build(content, template_path, out_path, narration_out=None):
 def prepare_figure(page, index, media_dir):
     """把 page.figure 变成可插入的东西。
 
-    返回 (kind, payload)：
-      ("shapes", canvas) —— 自己画的图，生成 PPT 原生形状，在 PowerPoint 里可编辑
-      ("png", path)      —— 申请书原图（type: image），按位图嵌入
-      (None, None)       —— 画不出，由调用方退回文字占位
-
-    自己画的图优先走 shapes；shapes 认不出的类型再退回旧的位图渲染。
+    figure 可以是一个对象，也可以是最多 MAX_FIGURES 个对象。
+    返回 {"shapes": [canvas, ...], "images": [(png路径, 图题), ...], "missing": [说明, ...]}。
+    自己画的图走形状；type=image 的原图走位图；logos 里打不开的路径记进 missing。
     """
-    fig = page.get("figure")
-    if fig is None or fig == "" or fig == FIG_PLACEHOLDER:
-        return None, None
-    spec = fig
-    if isinstance(fig, str):
-        if os.path.exists(fig):
-            spec = {"type": "image", "path": fig}
-        else:
-            return None, None
-    if _shapes is None:
-        return None, None
-    spec = _shapes.normalize_figure(spec)
-    if spec is None:
-        return None, None
-
-    # 申请书原图：本来就是一张图，按位图嵌入
-    if isinstance(spec, dict) and spec.get("type") == "image":
-        os.makedirs(media_dir, exist_ok=True)
-        dest = os.path.join(media_dir, "slide%d.png" % index)
-        try:
-            path = _shapes.render_image(spec, dest)
-        except Exception as exc:
-            print("  [校验] 第%d页原图嵌入失败：%s" % (index, exc), file=sys.stderr)
-            return None, None
-        return ("png", path) if path else (None, None)
-
-    # 自己画的图：生成原生形状，保证在 PowerPoint 里可编辑
-    canvas = _shapes.render_shapes(spec)
-    if canvas is not None and canvas.count():
-        return "shapes", canvas
-    return None, None
+    result = {"shapes": [], "images": [], "missing": []}
+    slots = page.get("_slots") or []
+    limit = len(slots) or None
+    figures = normalize_figures(page.get("figure"), limit)
+    extra = page.get("figure")
+    if isinstance(extra, list) and limit and len(extra) > limit:
+        result["missing"].append("给出 %d 组图，这一页模板只有 %d 个图槽，多出的未画" % (len(extra), limit))
+    if not figures or _shapes is None:
+        return result
+    os.makedirs(media_dir, exist_ok=True)
+    for n, fig in enumerate(figures, start=1):
+        spec = fig
+        if isinstance(fig, str):
+            spec = {"type": "image", "path": fig} if os.path.exists(fig) else None
+        if spec is None:
+            result["missing"].append("第 %d 组图无法识别" % n)
+            continue
+        spec = _shapes.normalize_figure(spec)
+        if spec is None:
+            result["missing"].append("第 %d 组图类型不受支持" % n)
+            continue
+        slot = (page.get("_slots") or [None])[n - 1] if page.get("_slots") else None
+        if slot:
+            spec = dict(spec)
+            spec["_w"] = slot["cx"]
+            spec["_h"] = slot["cy"]
+        if spec.get("type") == "image":
+            dest = os.path.join(media_dir, "slide%d_%d.png" % (index, n))
+            try:
+                path = _shapes.render_image(spec, dest)
+            except Exception as exc:
+                result["missing"].append("第 %d 组原图嵌入失败：%s" % (n, exc))
+                continue
+            if path:
+                result["images"].append((path, spec.get("caption") or spec.get("title") or ""))
+            else:
+                result["missing"].append("第 %d 组原图打不开：%s" % (n, spec.get("path") or ""))
+            continue
+        canvas = _shapes.render_shapes(spec)
+        if canvas is None or not canvas.count():
+            result["missing"].append("第 %d 组图没有画出形状" % n)
+            continue
+        result["shapes"].append(canvas)
+        if spec.get("type") == "logos":
+            wanted = spec.get("items") or []
+            have = set(_shapes.canvas_images(canvas))
+            for it in wanted:
+                path = it if isinstance(it, str) else (it.get("path") or it.get("image") or "")
+                if path and path not in have:
+                    result["missing"].append("logo 打不开，已跳过：%s" % path)
+    return result
 
 
 def write_narration(pages, narr, path):
@@ -1085,6 +1270,10 @@ def write_narration(pages, narr, path):
         fh.write("\n".join(lines) + "\n")
 
 
+CONTENT_TITLE_RE = re.compile(r"^研究内容[一二三四五六七八九十]+：")
+LEVEL_WORDS = ("CCF", "ccf", "SCI", "sci", "EI", "中科院", "一区", "二区")
+
+
 def check_content_rules(index, page):
     """把写进 content-spec 的硬规则变成脚本检查，别只停在文档里。"""
     out = []
@@ -1094,56 +1283,72 @@ def check_content_rules(index, page):
     if kind == "cover":
         if not (page.get("presenter") or "").strip():
             out.append("第%d页：封面缺 `presenter`，右下角会只剩一个「报告人：」" % index)
+        if not (page.get("position") or "").strip():
+            out.append("第%d页：封面缺 `position`。职位按本项目材料写，材料里没有就向用户要，不要猜" % index)
         if not (page.get("date") or "").strip():
             out.append("第%d页：封面缺 `date`，右下角日期会空着" % index)
+        if not (page.get("subtitle") or "").strip():
+            out.append("第%d页：封面缺副标题。默认用「重点实验室自主科研项目评审答辩」，"
+                       "项目类别不同就换成那个类别" % index)
         return out
+    if title.startswith("研究技术路线"):
+        out.append("第%d页：标题还是「研究技术路线」。同一研究内容的每一页都用「研究内容N：主题」" % index)
     if kind == "accumulation" and points and len(points) != ACCUMULATION_POINTS:
         out.append(
             "第%d页：第 2 页要点应固定写 %d 条（发表论文 / 项目经验 / 合作厂商 / 编译优化），"
             "当前 %d 条" % (index, ACCUMULATION_POINTS, len(points))
         )
+    if kind == "accumulation" and points:
+        paper = point_text(points[0])
+        if "国内外高水平" not in paper:
+            out.append("第%d页：论文栏主句要写「国内外高水平论文」，当前是：%s" % (index, paper[:24]))
+        if not any(w in paper for w in LEVEL_WORDS):
+            out.append("第%d页：论文栏缺级别信息。二级行要写 CCF-A / CCF-B（或材料里的同等分级）各多少篇" % index)
     summary = page.get("summary") or ""
-    if summary:
-        # 研究内容页：「针对…已有方法…不足…研究…技术」
-        if title.startswith("研究内容") and "针对" not in summary:
-            out.append("第%d页：研究内容页总结句没套模板。应为「针对〈问题〉，"
-                       "已有方法〈不足〉，研究〈技术〉」，当前是：%s" % (index, summary[:20]))
-        # 技术路线页：「提出/设计…相比于原有…优势/创新点在于…」
-        if title.startswith("研究技术路线"):
-            if not any(k in summary for k in ("提出", "设计")):
-                out.append("第%d页：技术路线页总结句没套模板。应以「提出/设计…方法」开头，"
-                           "当前是：%s" % (index, summary[:20]))
-            elif not any(k in summary for k in ("相比", "优势", "创新")):
-                out.append("第%d页：技术路线页总结句缺「相比于原有…，其优势在于…」这半句，"
-                           "当前是：%s" % (index, summary[:20]))
+    if summary and summary.startswith("针对"):
+        out.append("第%d页：总结句套了「针对……」。总结句说这一页做完得到什么，"
+                   "当前是：%s" % (index, summary[:24]))
+    if "经费" in title:
+        for pt in points:
+            if normalize_point(pt)["subs"]:
+                out.append("第%d页：经费页右侧只有一级标题，不挂二级行" % index)
+                break
+    return out
+
+
+def figure_types(page):
+    figs = normalize_figures(page.get("figure"))
+    out = []
+    for fig in figs:
+        if isinstance(fig, str):
+            out.append("image")
+        elif isinstance(fig, dict):
+            out.append(fig.get("type") or "")
     return out
 
 
 def check_figure_fit(index, page):
     """图表选型自检：图要对得上这一页，而且不能是换个壳的文字罗列。"""
     out = []
-    fig = page.get("figure")
-    if not isinstance(fig, dict):
+    figs = normalize_figures(page.get("figure"))
+    raw = page.get("figure")
+    slot_n = len(PAGE_SLOTS.get(index, {}).get("figures", []))
+    if isinstance(raw, list) and slot_n and len(raw) > slot_n:
+        out.append("第%d页：图给了 %d 组，模板这一页只有 %d 个图槽" % (index, len(raw), slot_n))
+    if not figs:
         return out
-    ftype = fig.get("type") or ""
+    types = figure_types(page)
     title = page.get("title") or ""
     kind = page.get("kind")
-    if kind == "text-left" and ftype in ("compare", "table", "cards"):
-        out.append(
-            "第%d页：需求/现状页用了 %s。这类页要读原文画逻辑链（type: logic），"
-            "把要点分成两栏摆上去不算图；确要沿用申请书原图时才改用 image" % (index, ftype)
-        )
-    if "技术路线" in title and ftype != "image":
-        # 用申请书原图的（image）不算问题——原图优先本来就是规范里的第一条路。
-        if ftype != "flow":
-            out.append("第%d页：技术路线页建议用 flow，当前是 %s" % (index, ftype or "空"))
-        elif not any((s.get("children") or s.get("desc")) for s in (fig.get("steps") or []) if isinstance(s, dict)):
-            out.append(
-                "第%d页：技术路线图只有光秃秃的步骤框。要读「研究思路方法与技术路线」"
-                "那几段，给每步挂上 children 子步骤" % index
-            )
+    # 需求页仍要有一条因果链；现状页可以是框架图加对比表
+    if kind == "text-left" and "需求分析" in title and "logic" not in types and "image" not in types:
+        out.append("第%d页：需求分析要有一条 logic 因果链，当前是 %s" % (index, "/".join(types)))
+    if "技术路线" in title:
+        out.append("第%d页：不再单设技术路线页。过程放在同一研究内容的第 2–3 页，用 flow 画步骤" % index)
     if kind == "figure-left" and not (page.get("points") or page.get("heading")):
         out.append("第%d页：只有图没有文字要点，图文要都有" % index)
+    for msg in page.get("_figure_missing") or []:
+        out.append("第%d页：%s" % (index, msg))
     return out
 
 
@@ -1154,7 +1359,7 @@ def report(pages, narr, out_path):
     for i, page in enumerate(pages, start=1):
         title = page.get("title") or page.get("kind")
         points = page.get("points") or []
-        n_chars = sum(len(p) for p in points)
+        n_chars = sum(len(point_text(p)) for p in points)
         line = "  第%2d页 [%-12s] %s" % (i, page.get("kind"), title)
         line += "  要点%d条/%d字" % (len(points), n_chars)
         if page.get("_body_pt"):
@@ -1163,10 +1368,12 @@ def report(pages, narr, out_path):
             line += "  总结%d字" % len(page["summary"])
             if page.get("_summary_pt"):
                 line += "/%d磅" % page["_summary_pt"]
-        if page.get("_figure_shapes") is not None:
-            line += "  形状图%d个（可编辑）" % page["_figure_shapes"].count()
-        elif page.get("_figure_png"):
-            line += "  原图"
+        canvases = page.get("_figure_shapes") or []
+        if canvases:
+            line += "  形状图%d组/%d个（可编辑）" % (len(canvases), sum(c.count() for c in canvases))
+        elif page.get("_figure_png") or page.get("_figure_pics"):
+            n = len(page.get("_figure_pics") or []) or 1
+            line += "  原图%d张" % n
         nar = narr(i)
         if nar:
             line += "  旁白%d字" % len(nar)
@@ -1175,8 +1382,13 @@ def report(pages, narr, out_path):
             warn.append("第%d页：要点 %d 条，超过 %d 条上限" % (i, len(points), MAX_POINTS))
         pt_limit = point_char_limit(page)
         for p in points:
-            if len(p) > pt_limit:
-                warn.append("第%d页：要点「%s」%d 字，超过 %d 字建议上限（已靠降字号消化）" % (i, p[:12], len(p), pt_limit))
+            item = normalize_point(p)
+            main = (item["label"] + "：" + item["text"]) if item["label"] else item["text"]
+            if len(main) > pt_limit:
+                warn.append("第%d页：要点「%s」%d 字，超过 %d 字建议上限（已靠降字号消化）" % (i, main[:12], len(main), pt_limit))
+            for sub in item["subs"]:
+                if len(sub) > SUB_CHARS:
+                    warn.append("第%d页：二级行「%s」%d 字，超过 %d 字，请拆短" % (i, sub[:12], len(sub), SUB_CHARS))
         if page.get("_summary_pt") and page["_summary_pt"] < SUMMARY_READABLE_PT:
             warn.append(
                 "第%d页：总结句压到 %d 磅。总结框只有一行高，请把它改短到 %d 字以内"
@@ -1190,8 +1402,32 @@ def report(pages, narr, out_path):
             )
         warn.extend(check_content_rules(i, page))
         warn.extend(check_figure_fit(i, page))
+        for canvas in page.get("_figure_shapes") or []:
+            for name, text, need, have in _shapes.text_overflows(canvas):
+                warn.append("第%d页：图内文字被截断「%s」（需要 %.2fcm，框高 %.2fcm），放大文本框或缩短后再生成"
+                            % (i, text[:18], need, have))
+            # 图内遮挡与出框：图里两个框压在一起，比字小一号严重得多
+            for a, b, ow, oh in _shapes.shape_overlaps(canvas):
+                warn.append("第%d页：图内「%s」与「%s」重叠 %.2f×%.2fcm，减少节点或加大间距"
+                            % (i, a, b, ow, oh))
+            for name, x0, y0, x1, y1 in _shapes.out_of_canvas(canvas):
+                warn.append("第%d页：图内「%s」超出图槽（%.2f, %.2f）–（%.2f, %.2f）"
+                            % (i, name, x0, y0, x1, y1))
+            for it in canvas.items:
+                if it.get("kind") == "arrow":
+                    span = abs(it["x2"] - it["x1"]) + abs(it["y2"] - it["y1"])
+                    if span < 0.6:
+                        warn.append("第%d页：箭头只有 %.2fcm，节点之间空隙不够，加大到 0.7cm 以上" % (i, span))
+        # 图标题与页标题重复：页面标题已经说了这件事，图里再写一遍是白占一行
+        page_title = (page.get("title") or "").strip()
+        for fig in normalize_figures(page.get("figure")):
+            if not isinstance(fig, dict):
+                continue
+            ft = (fig.get("title") or "").strip()
+            if ft and page_title and (ft == page_title or ft in page_title):
+                warn.append("第%d页：图标题「%s」与页标题重复，删掉图标题把高度让给图" % (i, ft))
         fig = page.get("figure")
-        has_fig = page.get("_figure_png") or page.get("_figure_shapes") is not None
+        has_fig = page.get("_figure_png") or page.get("_figure_shapes") or page.get("_figure_pics")
         if fig and fig != FIG_PLACEHOLDER and not has_fig:
             if isinstance(fig, dict) or (isinstance(fig, str) and os.path.exists(fig)):
                 warn.append("第%d页：图表未成功嵌入，槽位退回文字说明" % i)
@@ -1200,6 +1436,12 @@ def report(pages, narr, out_path):
         print("旁白总字数：%d 字（目标 %d–%d 字，约 %.1f 分钟）" % (total, NARRATION_MIN, NARRATION_MAX, total / 200.0))
         if not (NARRATION_MIN <= total <= NARRATION_MAX):
             warn.append("旁白总字数 %d 字，超出 %d–%d 字" % (total, NARRATION_MIN, NARRATION_MAX))
+        spoken = ("卡住", "对症", "说白了", "所以呢", "说白", "咱们")
+        for i in range(1, len(pages) + 1):
+            text = narr(i)
+            hit = [w for w in spoken if w in text]
+            if hit:
+                warn.append("第%d页旁白有口语「%s」。这是给评审专家的，按 narration-spec 的框架重写" % (i, "、".join(hit)))
     else:
         warn.append("未提供旁白，备注页为空")
     for w in warn:
