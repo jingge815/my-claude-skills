@@ -14,7 +14,8 @@ docs_dir = "/path/to/workspace/docs"    # request/design/implement/review 文档
 
 [loop]
 max_rounds      = 5      # 最多迭代轮数
-no_progress_max = 2      # 连续几轮"严重+高"数量不下降就停止
+no_progress_max = 2      # 连续几轮阻塞级别问题数量不下降就停止
+block_levels    = ["严重", "高"]   # 只有这些级别的问题会触发新一轮评审；其余级别同样修复，修完即结束
 timeout_minutes = 60     # 单次模型调用超时
 run_techdoc     = true   # 通过后是否自动生成最终技术文档
 techdoc_role    = "fixer"

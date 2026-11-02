@@ -2,7 +2,7 @@
 """评审-修复自动迭代程序。
 
 每轮先用评审模型调用 code-review-doc 技能，再用修复模型调用 tdd-implement 技能阶段五，
-直到评审报告中不再出现严重和高级别问题。技能内容不在本程序中复制，始终加载 skills 目录中的最新版本。
+评审发现的问题都会修复；阻塞级别（默认严重、高）清零后修完剩余问题即结束，不再开新一轮评审。技能内容不在本程序中复制，始终加载 skills 目录中的最新版本。
 评审与修复可分别使用 claude、codex、kimi 三种 CLI；每次调用都是新的进程与对话，结束后不保留会话。
 """
 import argparse
@@ -160,8 +160,9 @@ class Role:
         last_msg = log_file.with_suffix(".last.txt")
         stdin = prompt
         if self.engine == "claude":
-            cmd = ["claude", "-p", "--output-format", "json", "--permission-mode", "bypassPermissions",
-                   "--no-session-persistence"]
+            # stream-json 会记录每一步工具调用，便于在日志中确认加载了哪些技能
+            cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
+                   "--permission-mode", "bypassPermissions", "--no-session-persistence"]
             if max_turns:
                 cmd += ["--max-turns", str(max_turns)]
             for d in self.add_dirs:
@@ -200,9 +201,15 @@ class Role:
         return result
 
     def _result_claude(self, proc, log_file):
-        try:
-            data = json.loads(proc.stdout)
-        except json.JSONDecodeError:
+        data = None
+        for line in proc.stdout.splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "result":
+                data = ev
+        if data is None:
             raise LoopStop(f"[{self.name}] 输出无法解析（退出码 {proc.returncode}），见 {log_file}")
         if data.get("is_error") or proc.returncode != 0:
             raise LoopStop(f"[{self.name}] 调用失败：{str(data.get('result', ''))[:300]}，见 {log_file}")
@@ -407,6 +414,10 @@ def main():
     common = {"req_id": req_id, "project": workdir, "workdir": workdir, "docs_dir": docs_dir,
               "repos": "\n".join(f"- {r}" for r in repos)}
     history, best, stall, outcome = [], None, 0, ""
+    block_levels = loop_cfg.get("block_levels", ["严重", "高"])
+    if not block_levels or set(block_levels) - set(LEVELS):
+        raise SystemExit(f"block_levels 只能取 {LEVELS} 中的值")
+    block_name = "、".join(block_levels)
     round_base = last_review_round(docs_dir, req_id)
 
     try:
@@ -431,16 +442,18 @@ def main():
             shutil.copy2(review, rdir / review.name)
             counts = count_issues(review.read_text(encoding="utf-8"))
             history.append((review.name, counts))
-            blocking = counts["严重"] + counts["高"]
+            blocking = sum(counts[k] for k in block_levels)
             log(f"第 {no} 轮评审结果：{fmt_counts(counts)}（{review.name}）")
-            if blocking == 0:
-                outcome = f"通过：第 {no} 轮评审没有严重和高级别问题"
+            if sum(counts.values()) == 0:
+                outcome = f"通过：第 {no} 轮评审没有任何问题"
                 break
-            if best is not None and blocking >= best:
+            # 只剩非阻塞级别的问题：本轮照常修复，修完直接结束，不再开新一轮评审
+            final = blocking == 0
+            if not final and best is not None and blocking >= best:
                 stall += 1
                 if stall >= int(loop_cfg.get("no_progress_max", 2)):
-                    raise LoopStop(f"连续 {stall} 轮严重与高级别问题数量没有下降")
-            else:
+                    raise LoopStop(f"连续 {stall} 轮{block_name}级别问题数量没有下降")
+            elif not final:
                 best, stall = blocking, 0
 
             # 修复
@@ -454,8 +467,12 @@ def main():
                 raise LoopStop("修复进程没有输出 LOOP_STATUS，见 fix.log")
             if status[-1] == "NEED_HUMAN":
                 raise LoopStop("修复进程报告存在需要人工确认的事项，见实施文档待确认事项")
+            if final:
+                outcome = (f"通过：第 {no} 轮评审没有{block_name}级别问题，"
+                           f"剩余问题已在本轮修复，不再进行新一轮评审")
+                break
         else:
-            outcome = "停止：达到最大轮数仍有严重或高级别问题"
+            outcome = f"停止：达到最大轮数仍有{block_name}级别问题"
     except LoopStop as e:
         outcome = f"停止：{e}"
 
