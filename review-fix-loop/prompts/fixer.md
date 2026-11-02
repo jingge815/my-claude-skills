@@ -1,4 +1,4 @@
-请使用 tdd-implement 技能的"阶段五：评审问题确认与修复"，处理评审文档 {review_file}，并按技能要求更新实施文档 {implement_file}。
+请使用 tdd-implement 技能中的评审问题确认与修复"，处理评审文档 {review_file}，先确认是否是问题，把确认的问题全部修复，并按技能要求更新实施文档 {implement_file}。
 
 本次改动涉及以下仓库，修复时按评审问题中的位置到对应仓库修改：
 {repos}
