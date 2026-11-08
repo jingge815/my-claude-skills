@@ -13,6 +13,8 @@ python3 loop.py --check              # 只做准备检查与连通测试
 python3 loop.py                      # 开始迭代
 ```
 
+需要 Python 3.11 及以上。若 PATH 中的 `python3` 较旧（例如 PyTorch 环境为 3.10），会因缺少 `tomllib` 启动失败，改用系统的新版本即可，如 `/usr/bin/python3.12 loop.py`。
+
 前提：
 
 - `repos` 中每个都是 Git 仓库，至少一个有未提交的代码改动。
@@ -52,6 +54,13 @@ python3 loop.py                      # 开始迭代
 程序依赖的约定不需要写进提示词，每次调用时会自动追加在最后：无人值守、评审报告必须写到 `{review_file}`、问题标题格式"### 问题N（级别）"、修复回复最后一行输出 `LOOP_STATUS`。
 
 可用占位符：`{round}` 轮次号、`{req_id}` 需求标识、`{workdir}` 工作目录、`{repos}` 仓库列表（每行一个）、`{docs_dir}` 文档目录、`{implement_file}` 实施文档、`{review_file}` 本轮评审文件。
+
+## 深度思考与根因修复（默认行为）
+
+- 程序对 kimi 角色默认注入 `KIMI_MODEL_THINKING_EFFORT=max`，对 claude 角色默认注入 `CLAUDE_CODE_EFFORT_LEVEL=max`，让评审与修复都使用各自模型的最高思考强度；在角色的 `env` 中显式赋值可覆盖。
+- `prompts/review.md` 要求评审先定位根因、给出能一次性收敛同类问题的修改思路，并在写入报告前用相反假设复核；还要抽查前几轮修复是否只在探针上生效。
+- `prompts/fixer.md` 要求修复前先做根因分析、grep 全仓找同类入口与旁路，一次性修完并补测试；同时复核前几轮同类问题是否真正收敛，复发的按遗留问题一并修复。
+- 推荐搭配：评审 `model = "kimi-code/k3.1-pro"`，修复 `model = "deepseek-flash[1m]"`。
 
 ## 评审文件按轮次编号
 

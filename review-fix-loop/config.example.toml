@@ -53,7 +53,9 @@ check_url = "https://www.google.com"   # 开启后用 curl 检查是否能访问
 #   args         可选，追加到命令行的额外参数
 #   skills_dir   可选，覆盖 [skills].dir
 #   proxy        是否走 [proxy]，codex 需要 true
-#   [角色.env]   可选，追加环境变量
+#   env          可选，追加环境变量（内联写法，如 env = { K = "v" }）。
+#                程序默认给 kimi 注入 KIMI_MODEL_THINKING_EFFORT=max、给 claude 注入
+#                CLAUDE_CODE_EFFORT_LEVEL=max；显式赋值可覆盖。
 #
 # 提示词（自由书写，可用占位符见文件末尾）：
 #   prompt       = "prompts/xxx.md"   提示词文件，相对本目录或绝对路径，默认 prompts/review.md、prompts/fixer.md
@@ -67,19 +69,15 @@ check_url = "https://www.google.com"   # 开启后用 curl 检查是否能访问
 engine     = "claude"
 base_url   = "https://api.deepseek.com/anthropic"
 auth_token = "sk-xxxxxxxx"              # 在 config.toml 中填真实 key
-model      = "deepseek-flash"
+model      = "deepseek-flash[1m]"
 # settings_file = "~/.claude/settings.json.deepseek"   # 也可以直接引用已有配置文件中的 env，替代上面三行
 prompt     = "prompts/review.md"
 extra_prompt = """
 - 重点检查跨仓库接口是否一致。
 - 用需求文档验收标准中的数值实际运行验证。
 """
-
-# [reviewer.env]                        # DeepSeek 常用的额外变量，按需填写
-# ANTHROPIC_DEFAULT_OPUS_MODEL   = "deepseek-flash"
-# ANTHROPIC_DEFAULT_SONNET_MODEL = "deepseek-flash"
-# ANTHROPIC_DEFAULT_HAIKU_MODEL  = "deepseek-flash"
-# CLAUDE_CODE_SUBAGENT_MODEL     = "deepseek-flash"
+# env = { ANTHROPIC_DEFAULT_OPUS_MODEL = "deepseek-flash", ANTHROPIC_DEFAULT_SONNET_MODEL = "deepseek-flash",
+#         ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-flash", CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-flash" }
 
 [fixer]
 engine = "kimi"
@@ -94,13 +92,14 @@ extra_prompt = """
 # 组合二：Kimi 评审（账号） + DeepSeek 修复（密钥），把上面两段互换 engine 即可：
 # [reviewer]
 # engine = "kimi"
+# model  = "kimi-code/k3.1-pro"
 # prompt = "prompts/review.md"
 #
 # [fixer]
 # engine     = "claude"
 # base_url   = "https://api.deepseek.com/anthropic"
 # auth_token = "sk-xxxxxxxx"
-# model      = "deepseek-flash"
+# model      = "deepseek-flash[1m]"
 # prompt     = "prompts/fixer.md"
 
 # 组合三：Codex 评审（账号，需外网） + Kimi 修复（账号）：

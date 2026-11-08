@@ -91,6 +91,11 @@ class Role:
         self.add_dirs = add_dirs
         self.clear_session = cfg.get("clear_session", True)
         self.env = {k: str(v) for k, v in cfg.get("env", {}).items()}
+        # 默认最高强度思考，可在角色 env 中覆盖
+        if self.engine == "kimi":
+            self.env.setdefault("KIMI_MODEL_THINKING_EFFORT", "max")
+        elif self.engine == "claude":
+            self.env.setdefault("CLAUDE_CODE_EFFORT_LEVEL", "max")
         self.proxy_env = proxy_env or {}
         if self.engine == "claude":
             self._init_claude(cfg)
