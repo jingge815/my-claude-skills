@@ -4,6 +4,8 @@
 每轮先用评审模型调用 code-review-doc 技能，再用修复模型调用 tdd-implement 技能阶段五，
 评审发现的问题都会修复；阻塞级别（默认严重、高）清零后修完剩余问题即结束，不再开新一轮评审。技能内容不在本程序中复制，始终加载 skills 目录中的最新版本。
 评审与修复可分别使用 claude、codex、kimi 三种 CLI；每次调用都是新的进程与对话，结束后不保留会话。
+评审范围默认只看工作区未提交改动；repos 里给某个仓库配了 base/head 时，改为评审该提交区间
+加上工作区未提交改动，修复改动始终留在工作区。
 """
 import argparse
 import datetime as dt
@@ -15,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 TOOL_DIR = Path(__file__).resolve().parent
@@ -23,6 +26,14 @@ CACHE_DIR = Path.home() / ".cache" / "review-fix-loop"
 LEVELS = ("严重", "高", "中", "低")
 ISSUE_RE = re.compile(r"^#{2,4}\s*问题\s*\d+\s*[（(]\s*(严重|高|中|低)\s*[)）]", re.M)
 STATUS_RE = re.compile(r"LOOP_STATUS:\s*(OK|NEED_HUMAN)")
+
+
+@dataclass(frozen=True)
+class RepoSpec:
+    """一个参与评审的仓库。base 为空时只评审未提交改动（旧行为）。"""
+    path: Path
+    base: str | None = None
+    head: str = "HEAD"
 
 
 class LoopStop(Exception):
@@ -265,14 +276,37 @@ def excludes(repo, docs_dir):
         return []
 
 
-def code_fingerprint(repos, docs_dir):
-    """各仓库中 docs/ 以外代码的未提交状态指纹，用于确认评审过程没有修改代码。"""
+def committed_diff(spec, docs_dir=None):
+    """base..head 的已提交改动；没配 base 时为空。"""
+    if not spec.base:
+        return ""
+    ex = excludes(spec.path, docs_dir) if docs_dir else []
+    return git(spec.path, "diff", f"{spec.base}..{spec.head}", "--", ".", *ex)
+
+
+def worktree_diff(spec, docs_dir=None):
+    """工作区相对当前 HEAD 的未提交改动。"""
+    ex = excludes(spec.path, docs_dir) if docs_dir else []
+    return git(spec.path, "diff", "HEAD", "--", ".", *ex)
+
+
+def untracked_files(spec, docs_dir=None):
+    """工作区里未跟踪的文件（不含 docs）。"""
+    ex = excludes(spec.path, docs_dir) if docs_dir else []
+    return sorted(git(spec.path, "ls-files", "--others", "--exclude-standard", "--", ".", *ex).splitlines())
+
+
+def code_fingerprint(specs, docs_dir):
+    """各仓库评审范围内 docs/ 以外代码的指纹，用于确认评审过程没有修改代码。"""
     h = hashlib.sha256()
-    for repo in repos:
-        ex = excludes(repo, docs_dir)
+    for spec in specs:
+        repo = spec.path
         h.update(str(repo).encode())
-        h.update(git(repo, "diff", "HEAD", "--", ".", *ex).encode())
-        for f in sorted(git(repo, "ls-files", "--others", "--exclude-standard", "--", ".", *ex).splitlines()):
+        # HEAD 也计入指纹：评审如果自己提交了改动，同样要能发现。
+        h.update(git(repo, "rev-parse", "HEAD").encode())
+        h.update(committed_diff(spec, docs_dir).encode())
+        h.update(worktree_diff(spec, docs_dir).encode())
+        for f in untracked_files(spec, docs_dir):
             h.update(f.encode())
             p = repo / f
             if p.is_file():
@@ -280,8 +314,31 @@ def code_fingerprint(repos, docs_dir):
     return h.hexdigest()
 
 
-def all_diffs(repos):
-    return "".join(f"### 仓库 {repo}\n{git(repo, 'diff', 'HEAD')}\n" for repo in repos)
+def all_diffs(specs):
+    """所有仓库评审范围内的 diff：已提交区间 + 工作区未提交改动。"""
+    parts = []
+    for spec in specs:
+        parts.append(f"### 仓库 {spec.path}\n")
+        if spec.base:
+            parts.append(f"#### 已提交区间 {spec.base}..{spec.head}\n"
+                         f"{git(spec.path, 'diff', f'{spec.base}..{spec.head}')}\n")
+        parts.append(f"#### 工作区未提交改动（相对 HEAD）\n{git(spec.path, 'diff', 'HEAD')}\n")
+    return "".join(parts)
+
+
+def review_scope_text(specs):
+    """写进提示词的评审范围说明，与 loop.py 实际统计的口径一致。"""
+    lines = []
+    for spec in specs:
+        if spec.base:
+            suffix = ""
+            if git(spec.path, "rev-parse", spec.head).strip() != git(spec.path, "rev-parse", "HEAD").strip():
+                suffix = "（head 早于当前 HEAD，区间文件可能已被后续提交改动；定位以当前工作区为准）"
+            lines.append(f"- {spec.path}：`git diff {spec.base}..{spec.head}`（已提交区间）"
+                         f" + `git diff HEAD`（工作区未提交改动）{suffix}")
+        else:
+            lines.append(f"- {spec.path}：`git diff HEAD`（工作区未提交改动）+ 未跟踪文件")
+    return "\n".join(lines)
 
 
 def find_doc(docs_dir, kind, req_id):
@@ -302,24 +359,71 @@ def fmt_counts(c):
 
 def load_project(cfg):
     pc = cfg["project"]
-    repos = pc.get("repos") or [pc["path"]]
-    repos = [Path(os.path.expanduser(r)).resolve() for r in repos]
-    workdir = Path(os.path.expanduser(pc.get("workdir") or pc.get("path") or repos[0])).resolve()
+    raw = pc.get("repos") or ([pc["path"]] if pc.get("path") else None)
+    if not raw:
+        raise SystemExit("[project] 需要 repos 或 path")
+    specs = []
+    for item in raw:
+        if isinstance(item, str):
+            specs.append(RepoSpec(Path(os.path.expanduser(item)).resolve()))
+        elif isinstance(item, dict):
+            path = item.get("path")
+            if not path:
+                raise SystemExit("[project].repos 的表项必须包含 path")
+            specs.append(RepoSpec(
+                path=Path(os.path.expanduser(path)).resolve(),
+                base=item.get("base") or None,
+                head=str(item.get("head") or "HEAD"),
+            ))
+        else:
+            raise SystemExit("[project].repos 只能是路径字符串或 { path, base, head } 表")
+    workdir = Path(os.path.expanduser(pc.get("workdir") or pc.get("path") or specs[0].path)).resolve()
     docs_dir = Path(os.path.expanduser(pc.get("docs_dir") or workdir / "docs")).resolve()
-    return workdir, repos, docs_dir
+    return workdir, specs, docs_dir
 
 
-def preflight(workdir, repos, docs_dir, req_id, roles):
+def resolve_commit(repo, rev, label):
+    try:
+        return git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").strip()
+    except subprocess.CalledProcessError:
+        raise SystemExit(f"{repo} 的 {label}={rev!r} 不是有效提交")
+
+
+def is_ancestor(repo, ancestor, descendant):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                          cwd=repo, capture_output=True).returncode == 0
+
+
+def has_review_content(spec, docs_dir):
+    return bool(committed_diff(spec, docs_dir).strip()
+                or worktree_diff(spec, docs_dir).strip()
+                or untracked_files(spec, docs_dir))
+
+
+def preflight(workdir, specs, docs_dir, req_id, roles):
     if not workdir.is_dir():
         raise SystemExit(f"工作目录 {workdir} 不存在")
-    for repo in repos:
+    for spec in specs:
+        repo = spec.path
         if not (repo / ".git").exists():
             raise SystemExit(f"{repo} 不是 git 仓库")
+        head_sha = resolve_commit(repo, spec.head, "head")
+        if spec.base:
+            base_sha = resolve_commit(repo, spec.base, "base")
+            if not is_ancestor(repo, base_sha, head_sha):
+                raise SystemExit(f"{repo} 的 base={spec.base} 不是 head={spec.head} 的祖先，区间方向不对")
+        # 修复要落在当前工作区，评审终点必须是当前 HEAD 的祖先（或就是 HEAD）。
+        current = git(repo, "rev-parse", "HEAD").strip()
+        if not is_ancestor(repo, head_sha, current):
+            raise SystemExit(
+                f"{repo} 的 head={spec.head} 不在当前检出提交 {current[:12]} 的历史上。"
+                "评审终点必须是当前工作区的祖先；如需评审其他分支，请先建 worktree 或在对应分支运行。")
     for kind in ("request", "design", "implement"):
         if not find_doc(docs_dir, kind, req_id):
             raise SystemExit(f"缺少 {docs_dir}/{kind}-{req_id}-*.md")
-    if not any(git(r, "status", "--porcelain", "--", ".", *excludes(r, docs_dir)).strip() for r in repos):
-        raise SystemExit("所有仓库在 docs 以外都没有未提交的代码改动，无可评审内容")
+    if not any(has_review_content(spec, docs_dir) for spec in specs):
+        raise SystemExit("所有仓库在评审范围内（docs 以外）都没有代码改动，无可评审内容")
+    log("评审范围：\n" + review_scope_text(specs))
     ping_dir = CACHE_DIR / "ping"
     ping_dir.mkdir(parents=True, exist_ok=True)
     for role in roles.values():
@@ -334,17 +438,21 @@ CONTRACT = {
 ---
 以下为自动迭代程序的固定约定，优先于上文：
 1. 当前是第 {round} 轮，无人值守，不要向用户提问，也不要等待确认。
-2. 评审报告必须写到 {review_file}（本轮固定文件名，不要使用其他文件名，也不要改动其他轮次的评审文件）。
-3. 问题标题必须使用"### 问题N（严重/高/中/低）: ……"格式，程序依赖该格式统计问题数量。
-4. 只写评审报告，不得修改 {docs_dir} 以外的任何文件。
+2. 本轮评审的代码范围（以每个仓库的实际 git 结果为准）：
+{review_scope}
+3. 评审报告必须写到 {review_file}（本轮固定文件名，不要使用其他文件名，也不要改动其他轮次的评审文件）。
+4. 问题标题必须使用"### 问题N（严重/高/中/低）: ……"格式，程序依赖该格式统计问题数量。
+5. 只写评审报告，不得修改 {docs_dir} 以外的任何文件。
 """,
     "fixer": """
 ---
 以下为自动迭代程序的固定约定，优先于上文：
 1. 当前是第 {round} 轮，无人值守，不要向用户提问，也不要等待确认。
-2. 本轮只处理评审文档 {review_file}，处理结果更新到实施文档 {implement_file}。
-3. 不要提交代码，所有仓库的改动保持未提交状态。
-4. 回复的最后一行只能是以下二者之一：
+2. 本轮评审的代码范围（修复时按该范围定位问题，修复落在当前工作区）：
+{review_scope}
+3. 本轮只处理评审文档 {review_file}，处理结果更新到实施文档 {implement_file}。
+4. 修复改动保持未提交状态，不要 commit；评审范围里已提交的改动保持原样。
+5. 回复的最后一行只能是以下二者之一：
    - LOOP_STATUS: OK（所有确认成立的问题都已修复，且上文要求的验证都已通过）
    - LOOP_STATUS: NEED_HUMAN（存在需要用户确认的事项、无法修复的问题或验证无法通过）
 """,
@@ -388,7 +496,7 @@ def main():
 
     cfg = tomllib.loads(Path(args.config).read_text(encoding="utf-8"))
     loop_cfg = cfg.get("loop", {})
-    workdir, repos, docs_dir = load_project(cfg)
+    workdir, specs, docs_dir = load_project(cfg)
     req_id = cfg["project"]["req_id"]
     skills_dir = cfg.get("skills", {}).get("dir", str(DEFAULT_SKILLS_DIR))
     timeout_s = int(loop_cfg.get("timeout_minutes", 60)) * 60
@@ -399,14 +507,14 @@ def main():
     proxy_env = None
     if any(cfg[n].get("proxy", False) for n in role_names):
         proxy_env = setup_proxy(cfg.get("proxy", {}))
-    add_dirs = [d for d in dict.fromkeys(repos + [docs_dir]) if d != workdir]
+    add_dirs = [d for d in dict.fromkeys([s.path for s in specs] + [docs_dir]) if d != workdir]
     roles = {n: Role(n, cfg[n], add_dirs, skills_dir, proxy_env if cfg[n].get("proxy", False) else None)
              for n in role_names}
     templates = {"reviewer": build_template("reviewer", cfg["reviewer"], "prompts/review.md"),
                  "fixer": build_template("fixer", cfg["fixer"], "prompts/fixer.md"),
                  "techdoc": build_template("techdoc", cfg.get("techdoc", {}), "prompts/techdoc.md")}
 
-    preflight(workdir, repos, docs_dir, req_id, roles)
+    preflight(workdir, specs, docs_dir, req_id, roles)
     if args.check:
         log("准备检查通过")
         return
@@ -414,10 +522,14 @@ def main():
     run_dir = CACHE_DIR / "runs" / f"{workdir.name}-{req_id}" / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}"
     run_dir.mkdir(parents=True)
     log(f"运行目录：{run_dir}")
-    base = "；".join(f"{r.name} {git(r, 'rev-parse', '--abbrev-ref', 'HEAD').strip()}"
-                    f"@{git(r, 'rev-parse', '--short', 'HEAD').strip()}" for r in repos)
+    base = "；".join(
+        f"{s.path.name} {git(s.path, 'rev-parse', '--abbrev-ref', 'HEAD').strip()}"
+        f"@{git(s.path, 'rev-parse', '--short', 'HEAD').strip()}"
+        + (f" 对比 {s.base}..{s.head}" if s.base else "")
+        for s in specs)
     common = {"req_id": req_id, "project": workdir, "workdir": workdir, "docs_dir": docs_dir,
-              "repos": "\n".join(f"- {r}" for r in repos)}
+              "repos": "\n".join(f"- {s.path}" for s in specs),
+              "review_scope": review_scope_text(specs)}
     history, best, stall, outcome = [], None, 0, ""
     block_levels = loop_cfg.get("block_levels", ["严重", "高"])
     if not block_levels or set(block_levels) - set(LEVELS):
@@ -436,11 +548,11 @@ def main():
 
             # 评审：每次都是全新进程、全新对话，结束后不保留会话
             log(f"第 {no} 轮评审开始（{roles['reviewer'].engine}）")
-            before_fp = code_fingerprint(repos, docs_dir)
+            before_fp = code_fingerprint(specs, docs_dir)
             started = dt.datetime.now().timestamp()
             roles["reviewer"].run(render(templates["reviewer"], values), workdir, rdir / "review.log", timeout_s)
-            if code_fingerprint(repos, docs_dir) != before_fp:
-                (rdir / "reviewer-changes.patch").write_text(all_diffs(repos), encoding="utf-8")
+            if code_fingerprint(specs, docs_dir) != before_fp:
+                (rdir / "reviewer-changes.patch").write_text(all_diffs(specs), encoding="utf-8")
                 raise LoopStop("评审过程修改了 docs 以外的代码，已停止，改动见 reviewer-changes.patch")
             if not review.exists() or review.stat().st_mtime < started:
                 raise LoopStop(f"本轮评审没有生成 {review.name}")
@@ -464,7 +576,7 @@ def main():
             # 修复
             log(f"第 {no} 轮修复开始（{roles['fixer'].engine}）")
             result = roles["fixer"].run(render(templates["fixer"], values), workdir, rdir / "fix.log", timeout_s)
-            (rdir / "changes.patch").write_text(all_diffs(repos), encoding="utf-8")
+            (rdir / "changes.patch").write_text(all_diffs(specs), encoding="utf-8")
             implement = find_doc(docs_dir, "implement", req_id)
             shutil.copy2(implement, rdir / implement.name)
             status = STATUS_RE.findall(result)

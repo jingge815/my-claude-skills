@@ -9,6 +9,13 @@ repos    = [                            # 参与评审的 git 仓库，可以多
   "/path/to/workspace/repo-a",
   "/path/to/workspace/repo-b",
 ]
+# 也可以按仓库指定已提交的评审区间（不写 base 时只评审未提交改动）：
+# repos = [
+#   { path = "/path/to/workspace/repo-a", base = "263fcda", head = "daef534" },
+#   { path = "/path/to/workspace/repo-b" },   # head 默认 HEAD
+# ]
+# head 必须是当前检出 HEAD 的祖先（或等于 HEAD），否则程序拒绝启动（修复要落在当前工作区）。
+# 评审范围 = git diff base..head + git diff HEAD（当前未提交改动）；修复改动保持未提交。
 docs_dir = "/path/to/workspace/docs"    # request/design/implement/review 文档所在目录，默认 <workdir>/docs
 # 验证/测试命令不在这里配置，直接写进修复提示词（见下方 [fixer] 的 extra_prompt 示例）
 

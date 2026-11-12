@@ -17,7 +17,7 @@ python3 loop.py                      # 开始迭代
 
 前提：
 
-- `repos` 中每个都是 Git 仓库，至少一个有未提交的代码改动。
+- `repos` 中每个都是 Git 仓库，至少一个在评审范围内有代码改动：默认是未提交改动；配置了 `base`/`head` 时是 `base..head` 的已提交区间，加上当前工作区未提交改动。
 - `docs_dir` 下已有 `request-<标识>-*.md`、`design-<标识>-*.md`、`implement-<标识>-*.md`。
 - kimi 与 codex 已在终端完成账号登录（`kimi login`、`codex login`），程序直接使用 `~/.kimi-code`、`~/.codex` 中的登录状态，不需要 key。DeepSeek 用密钥，写在 `config.toml` 或其引用的 `settings_file` 中。
 
@@ -53,7 +53,7 @@ python3 loop.py                      # 开始迭代
 
 程序依赖的约定不需要写进提示词，每次调用时会自动追加在最后：无人值守、评审报告必须写到 `{review_file}`、问题标题格式"### 问题N（级别）"、修复回复最后一行输出 `LOOP_STATUS`。
 
-可用占位符：`{round}` 轮次号、`{req_id}` 需求标识、`{workdir}` 工作目录、`{repos}` 仓库列表（每行一个）、`{docs_dir}` 文档目录、`{implement_file}` 实施文档、`{review_file}` 本轮评审文件。
+可用占位符：`{round}` 轮次号、`{req_id}` 需求标识、`{workdir}` 工作目录、`{repos}` 仓库列表（每行一个）、`{review_scope}` 每个仓库的评审范围（已提交区间或未提交改动）、`{docs_dir}` 文档目录、`{implement_file}` 实施文档、`{review_file}` 本轮评审文件。
 
 ## 深度思考与根因修复（默认行为）
 
@@ -68,7 +68,26 @@ python3 loop.py                      # 开始迭代
 
 ## 多仓库
 
-`[project]` 中用 `repos = [...]` 列出所有参与的仓库，`workdir` 是模型进程的工作目录（通常是这些仓库的公共父目录），`docs_dir` 是文档目录。程序会检查每个仓库的未提交改动，确认评审没有修改任何仓库的代码，每轮的 `changes.patch` 包含所有仓库的 diff。不在 `workdir` 下的仓库与文档目录会通过 `--add-dir` 交给模型。只有一个仓库时仍可以只写 `path = "..."`。
+`[project]` 中用 `repos = [...]` 列出所有参与的仓库，`workdir` 是模型进程的工作目录（通常是这些仓库的公共父目录），`docs_dir` 是文档目录。程序会检查每个仓库的评审范围，确认评审没有修改任何仓库的代码，每轮的 `changes.patch` 包含所有仓库评审范围内的 diff。不在 `workdir` 下的仓库与文档目录会通过 `--add-dir` 交给模型。只有一个仓库时仍可以只写 `path = "..."`。
+
+### 评审已提交的提交区间
+
+`repos` 的每个元素可以是路径字符串（只评审未提交改动），也可以是表，指定该仓库的提交区间：
+
+```toml
+repos = [
+  { path = "/path/to/repo-a", base = "263fcda", head = "daef534" },
+  "/path/to/repo-b",
+]
+```
+
+- `base`：区间起点。不写则沿用旧行为，只评审未提交改动。
+- `head`：区间终点，默认 `HEAD`。必须是当前检出 `HEAD` 的祖先（或等于 HEAD），否则程序拒绝启动——修复必须落在当前工作区，评审终点不能是工作区里不存在的提交。需要评审其他分支时，先建 worktree 或在对应分支运行。
+- `head` 指向本轮要评审的最后一个提交；之后又提交了新改动时，要把 `head` 前移到新的提交。不写 `head` 则用 `HEAD`，会包含 `base` 到 `HEAD` 的全部差异（含中间合并带入的其他分支改动）。
+- `head` 早于当前 `HEAD` 时，区间内的文件可能已被后续提交改动；评审报告里的行号要以当前工作区为准，`changes.patch` 里的提交区间 diff 也不能直接套到当前工作区。
+- 每个仓库独立配置，可以有的看提交区间、有的只看未提交改动。
+- 评审范围 = `git diff base..head` 的已提交区间 + `git diff HEAD` 的当前工作区未提交改动；修复角色只产生未提交改动，不会 commit。第二轮起评审自然能看到上一轮的修复。
+- 评审过程改动代码的检测（fingerprint）同时覆盖提交区间、工作区未提交改动、未跟踪文件和当前 HEAD；评审若自己 commit 也会被发现。
 
 ## 模型配置
 
@@ -104,10 +123,10 @@ python3 loop.py                      # 开始迭代
 
 每次运行保存在 `~/.cache/review-fix-loop/runs/<工作目录名>-<标识>/<时间>/`：
 
-- `round-NN/`：本轮评审报告副本、实施文档副本、`changes.patch`（修复后所有仓库的未提交改动）、模型调用日志（`*.log`）
+- `round-NN/`：本轮评审报告副本、实施文档副本、`changes.patch`（修复后所有仓库评审范围内的改动，含已提交区间与未提交改动）、模型调用日志（`*.log`）
 - `summary.md`：每轮各级问题数量与最终结论
 
 ## 注意
 
 - 子进程都以免确认模式运行（claude `bypassPermissions`、codex `--dangerously-bypass-approvals-and-sandbox`、kimi `-p`），模型执行命令不会再确认。请在单独的分支或工作树中运行，必要时用各轮的 `changes.patch` 回退。
-- 修复角色不会提交代码，所有改动保持未提交状态。
+- 修复角色不会提交代码，修复改动保持未提交状态；配置了 `base` 时，评审范围里已提交的改动不会被改写。
