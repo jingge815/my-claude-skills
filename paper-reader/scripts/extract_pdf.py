@@ -1,14 +1,13 @@
-"""从论文 PDF 抽取全文、元信息、图表裁剪图和整页预览图。
+"""从论文 PDF 抽取全文、整页预览图、图表裁剪图。
 
-用法: pr.sh extract <paper.pdf> --out <工作目录>
+用法: .venv/bin/python scripts/extract_pdf.py <论文.pdf> --out <工作目录>
 
 产出（都在 <工作目录>/extract/ 下）:
-  text.md        带页码标记的全文（按版面块顺序，含图表标题），供通读
-  outline.json   疑似章节标题（按字号/粗体判定），方便定位
-  meta.json      题目候选、页数、PDF 元数据
-  figures.json   图/表清单：id、标签、标题全文、页码、裁剪框、图片文件、尺寸
+  text.md        带页码标记的全文（按版面块顺序），供通读与数字溯源
+  figures.json   图/表清单：id、标题全文、页码、裁剪文件、宽高比
   figures/       每个图/表的裁剪 PNG（200 dpi）
-  pages/         每页整页预览 PNG（110 dpi），用于核对裁剪是否完整、找不到图时整页兜底
+  pages/         每页整页预览 PNG（110 dpi），用于核对裁剪、扫描版兜底
+  meta.json      题目候选、页数、PDF 元数据
 """
 from __future__ import annotations
 
@@ -16,12 +15,11 @@ import argparse
 import json
 import re
 import statistics
+import sys
 from collections import Counter
 from pathlib import Path
 
 import pymupdf
-
-from common import die, log
 
 CAPTION_RE = re.compile(
     r"^\s*(Figure|Fig\.?|FIGURE|FIG\.?|Table|TABLE|Algorithm|ALGORITHM|图|表)\s*"
@@ -31,6 +29,15 @@ FIG_DPI = 200
 PAGE_DPI = 110
 
 
+def die(msg: str, code: int = 1):
+    print(f"[extract] 错误: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str):
+    print(f"[extract] {msg}", file=sys.stderr, flush=True)
+
+
 def block_text(b) -> str:
     return " ".join("".join(s["text"] for s in l["spans"]) for l in b.get("lines", [])).strip()
 
@@ -38,12 +45,6 @@ def block_text(b) -> str:
 def block_size(b) -> float:
     sizes = [s["size"] for l in b.get("lines", []) for s in l["spans"] if s["text"].strip()]
     return statistics.median(sizes) if sizes else 0.0
-
-
-def block_is_bold(b) -> bool:
-    spans = [s for l in b.get("lines", []) for s in l["spans"] if s["text"].strip()]
-    return bool(spans) and ("Bold" in spans[0]["font"] or "bold" in spans[0]["font"].lower()
-                            or bool(spans[0]["flags"] & 16))
 
 
 def body_font_size(doc) -> float:
@@ -56,27 +57,25 @@ def body_font_size(doc) -> float:
     return c.most_common(1)[0][0] if c else 10.0
 
 
-def is_caption(b, body_size: float) -> tuple[str, str] | None:
+def is_caption(b, body_size: float):
     t = block_text(b)
     m = CAPTION_RE.match(t)
     if not m:
         return None
-    kind_word, num = m.group(1), m.group(2)
-    # 正文中的 "Figure 3 shows ..." 没有句点/冒号，CAPTION_RE 已排除；
-    # 再要求标题块要么加粗，要么字号不大于正文，避免把章节标题当图注。
+    # 排除正文中的 "Figure 3 shows ..."；再要求标题块字号不大于正文，避免误抓章节标题
     if block_size(b) > body_size + 1.5:
         return None
-    k = kind_word.lower()
+    k = m.group(1).lower()
     if k.startswith(("fig", "图")):
         kind = "fig"
     elif k.startswith(("tab", "表")):
         kind = "tab"
     else:
         kind = "alg"
-    return kind, num
+    return kind, m.group(2)
 
 
-def column_span(bbox, page_w) -> tuple[float, float]:
+def column_span(bbox, page_w):
     """图注所在栏的水平范围。跨过页面中线的图注视为通栏。"""
     mid = page_w / 2
     x0, _, x1, _ = bbox
@@ -103,11 +102,10 @@ def is_body_block(b, body_size, page_w) -> bool:
         return False
     avg_chars = sum(len(l) for l in lines) / len(lines)
     bw = b["bbox"][2] - b["bbox"][0]
-    # 半栏宽约占页宽 40%；正文行通常接近栏宽
     return avg_chars >= 25 and bw >= 0.3 * page_w
 
 
-def find_regions(page, body_size, page_no):
+def find_regions(page, body_size):
     """返回本页 [(kind, num, caption_text, crop_rect)]。"""
     W, H = page.rect.width, page.rect.height
     d = page.get_text("dict")
@@ -117,13 +115,11 @@ def find_regions(page, body_size, page_no):
         c = is_caption(b, body_size)
         if c:
             captions.append((c, b))
-            continue
-        if is_body_block(b, body_size, W):
+        elif is_body_block(b, body_size, W):
             body_blocks.append(b)
 
     # 页眉页脚范围
-    top_limit = 40.0
-    bot_limit = H - 40.0
+    top_limit, bot_limit = 40.0, H - 40.0
     for b in blocks:
         y0, y1 = b["bbox"][1], b["bbox"][3]
         if y1 < 70 and block_size(b) < body_size:
@@ -131,7 +127,7 @@ def find_regions(page, body_size, page_no):
         if y0 > H - 70 and block_size(b) < body_size + 0.5 and len(block_text(b)) < 80:
             bot_limit = min(bot_limit, y0 - 2)
 
-    # 图形元素：矢量绘制、位图、非正文文字
+    # 图形元素：矢量绘制、位图、非正文文字（图例、坐标刻度等）
     graphics = []
     for dr in page.get_drawings():
         r = dr["rect"]
@@ -149,7 +145,7 @@ def find_regions(page, body_size, page_no):
     for (kind, num), cb in captions:
         cx0, cy0, cx1, cy1 = cb["bbox"]
         sx0, sx1 = column_span(cb["bbox"], W)
-        # 表格标题通常在上方，图标题在下方；表格先往下找，找不到再往上
+        # 表格标题通常在上方，图标题在下方；各先往惯例方向找
         directions = ["down", "up"] if kind == "tab" else ["up", "down"]
         crop = None
         for direction in directions:
@@ -180,8 +176,7 @@ def find_regions(page, body_size, page_no):
                 continue
             crop = (u + (-4, -4, 4, 4)) & page.rect
             break
-        caption = block_text(cb)
-        results.append((kind, num, caption, crop, pymupdf.Rect(cb["bbox"])))
+        results.append((kind, num, block_text(cb), crop))
     return results
 
 
@@ -191,31 +186,14 @@ def guess_title(doc) -> str:
     for b in page.get_text("dict")["blocks"]:
         if b["type"] != 0:
             continue
-        sz = block_size(b)
-        t = block_text(b)
+        sz, t = block_size(b), block_text(b)
         if sz > best_size and len(t) > 8 and b["bbox"][1] < page.rect.height * 0.5:
             best, best_size = t, sz
     return re.sub(r"\s+", " ", best)
 
 
-def find_headings(doc, body_size):
-    heads = []
-    pat = re.compile(r"^(\d+(\.\d+)*\.?|[IVX]+\.|[A-Z]\.)?\s*[A-Z一-鿿]")
-    for pno, page in enumerate(doc, 1):
-        for b in page.get_text("dict")["blocks"]:
-            if b["type"] != 0 or len(b["lines"]) > 2:
-                continue
-            t = block_text(b)
-            if not (3 <= len(t) <= 90) or CAPTION_RE.match(t):
-                continue
-            sz = block_size(b)
-            if (sz >= body_size + 1.0 or (block_is_bold(b) and sz >= body_size - 0.3)) and pat.match(t):
-                heads.append({"page": pno, "size": round(sz, 1), "text": t})
-    return heads
-
-
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("pdf")
     ap.add_argument("--out", required=True, help="工作目录，产物写到 <out>/extract/")
     args = ap.parse_args()
@@ -232,7 +210,7 @@ def main():
         die("PDF 有密码保护，无法解析")
     body = body_font_size(doc)
 
-    # ---- 全文
+    # ---- 全文（带页码标记）
     lines = [f"# {pdf.name}\n"]
     total_chars = 0
     for pno, page in enumerate(doc, 1):
@@ -248,19 +226,19 @@ def main():
     if total_chars < 500 * max(1, len(doc) // 4):
         log("警告：可提取文字很少，可能是扫描版 PDF。请改为查看 pages/ 下的整页图片阅读。")
 
-    # ---- 页面预览
+    # ---- 整页预览
     for pno, page in enumerate(doc, 1):
         page.get_pixmap(dpi=PAGE_DPI).save(out / "pages" / f"page{pno:02d}.png")
 
-    # ---- 图表
+    # ---- 图表裁剪
     figures, seen = [], set()
     for pno, page in enumerate(doc, 1):
-        for kind, num, caption, crop, cap_rect in find_regions(page, body, pno):
+        for kind, num, caption, crop in find_regions(page, body):
             fid = f"{kind}{num}"
             if fid in seen:
                 fid = f"{fid}_p{pno}"
             seen.add(fid)
-            entry = {"id": fid, "kind": kind, "label": caption.split(" ")[0] + " " + num,
+            entry = {"id": fid, "kind": kind, "label": f"{caption.split(' ')[0]} {num}",
                      "caption": re.sub(r"\s+", " ", caption), "page": pno}
             if crop is None:
                 entry.update({"file": f"pages/page{pno:02d}.png", "crop": None,
@@ -278,20 +256,21 @@ def main():
         figures.append({"id": f"page{pno}", "kind": "page", "label": f"Page {pno}",
                         "caption": f"原文第 {pno} 页", "page": pno,
                         "file": f"pages/page{pno:02d}.png"})
-    (out / "figures.json").write_text(json.dumps(figures, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "figures.json").write_text(
+        json.dumps(figures, ensure_ascii=False, indent=1), encoding="utf-8")
 
     meta = {"pdf": str(pdf.resolve()), "pages": len(doc), "title_guess": guess_title(doc),
             "pdf_metadata": {k: v for k, v in (doc.metadata or {}).items() if v},
-            "body_font_size": body, "text_chars": total_chars}
-    (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
-    (out / "outline.json").write_text(json.dumps(find_headings(doc, body), ensure_ascii=False, indent=1),
-                                      encoding="utf-8")
+            "text_chars": total_chars}
+    (out / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
     n_fig = sum(1 for f in figures if f["kind"] in ("fig", "tab", "alg"))
     n_fail = sum(1 for f in figures if f["kind"] in ("fig", "tab", "alg") and f.get("crop") is None)
     log(f"完成：{len(doc)} 页，{total_chars} 字符，图/表/算法 {n_fig} 个（定位失败 {n_fail} 个）")
     log(f"输出目录：{out}")
-    print(json.dumps({"extract_dir": str(out), "figures": n_fig, "failed": n_fail}, ensure_ascii=False))
+    print(json.dumps({"extract_dir": str(out), "figures": n_fig, "failed": n_fail,
+                      "pages": len(doc)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
