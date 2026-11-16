@@ -81,7 +81,8 @@ text-left 正文右沿收到图槽左沿前 0.4 cm；figure-left 正文左沿贴
 |---|---|---|
 | cover | title | subtitle（默认「论文总结汇报」，应写发表信息）、presenter、date、org（默认中国科学院软件研究所） |
 | text-left / status / figure-left | title、points、figure | summary（status 页无总结槽，写了也不渲染） |
-| closing | — | title（默认「要点回顾」）、summary（一句话 Take-away，可 {{红粗}}）、info（论文出处一行）、thanks（默认「感谢聆听」，居中） |
+| refs | refs（`[N] 作者. 题目. 出处 年份` 数组，≤10 条，编号与正文引用对应） | title（默认「参考文献」）。复用 text-left 蓝图：删图槽、清总结槽、正文框拉通全宽 (1.13, 4.13) 31.57×12.40 cm，条目字号 12–14 磅自适应 |
+| closing | — | title（默认「要点回顾」）、summary（一句话 Take-away，可 {{红粗}}）、info（论文出处一行：英文原题 · 会议/期刊 年份 · 论文网址 · 代码链接若有）、thanks（默认「感谢聆听」，居中） |
 
 - `points` 的 text 与 `subs`、closing 的 summary/info 支持**重点标记**：
   `{{文字}}` → 红色（C00000）加粗；`**文字****` → 加粗。每个内容页至少一处 `{{}}`。
@@ -95,30 +96,36 @@ text-left 正文右沿收到图槽左沿前 0.4 cm；figure-left 正文左沿贴
 
 ## 六、脚本清单（按流程顺序）
 
-**输出文件名一律英文**（`check_ppt` 强制）：`paper-ppt-<简称>-<YYYYMMDD>.pptx`、
-`narration-<简称>-<YYYYMMDD>.md/.docx`，简然后用论文名的英文缩写（如 PATTON、LLMServe）。
+**输出文件名用论文题目**（`check_ppt` 校验 pptx 后缀）：`<论文题目>-slide.pptx`、
+`<论文题目>-旁白.md/.docx`。论文题目取 `extract/meta.json` 的 `title_guess`，清理规则
+与 paper-reader 一致（空格换 `_`，`/\:*?"<>|` 换 `-`，去首尾标点，超 60 字符在词边界
+截断）。例：题目 `AttAcc: A Sparsity-Aware Accelerator` →
+`AttAcc_A_Sparsity-Aware_Accelerator-slide.pptx`。
 
 ```bash
 PY=<skill目录>/.venv/bin/python; S=<skill目录>/scripts
 
-# 1）提取论文全文与图表裁剪
+# 1）提取论文全文、首页封面与图表裁剪（cover.png + meta.json 含 title_guess/link_candidates）
 $PY $S/extract_pdf.py 论文.pdf --out <工作目录>
 
 # 2）生成 PPT（旁白写入备注页，另出旁白稿 md）
-$PY $S/build_ppt.py --content content.json --out paper-ppt-<简称>-<YYYYMMDD>.pptx \
-        --narration-out narration-<简称>-<YYYYMMDD>.md
+$PY $S/build_ppt.py --content content.json --out <论文题目>-slide.pptx \
+        --narration-out <论文题目>-旁白.md
 
-# 3）独立质量门禁（python-pptx 重新打开成品交叉验证）
-$PY $S/check_ppt.py paper-ppt-<简称>-<YYYYMMDD>.pptx --content content.json
+# 3）门禁1：结构与内容（python-pptx 重新打开成品交叉验证；含参考文献对应、有效 DPI、图必讲）
+$PY $S/check_ppt.py <论文题目>-slide.pptx --content content.json
 
-# 4）旁白稿机械校验（结构/预算/格式/口语/数字溯源）
-$PY $S/check_narration.py narration-<简称>-<YYYYMMDD>.md --extract <工作目录>/extract
+# 4）门禁2：旁白稿机械校验（结构/预算/格式/口语/数字溯源）
+$PY $S/check_narration.py <论文题目>-旁白.md --extract <工作目录>/extract
 
-# 5）逐页出预览图，肉眼核对版式
-$PY $S/preview_slides.py --pptx paper-ppt-<简称>-<YYYYMMDD>.pptx --out-dir preview
+# 5）门禁3：逐页出预览图并程序化检测版面（区域空白/图偏小）
+$PY $S/preview_slides.py --pptx <论文题目>-slide.pptx --out-dir preview
+$PY $S/inspect_preview.py preview --content content.json
 
 # 6）旁白稿转 docx
-$PY $S/build_docx.py narration-<简称>-<YYYYMMDD>.md
+$PY $S/build_docx.py <论文题目>-旁白.md
+
+# 7）进入阶段 6 迭代：发现问题改 content.json/figs → 回到 2）重新生成，直到三道门禁错误清零
 ```
 
 依赖：pymupdf、python-pptx、python-docx、pillow、numpy（`.venv` 已装，见 requirements.txt）。

@@ -4,10 +4,11 @@
 
 产出（都在 <工作目录>/extract/ 下）:
   text.md        带页码标记的全文（按版面块顺序），供通读与数字溯源
-  figures.json   图/表清单：id、标题全文、页码、裁剪文件、宽高比
+  cover.png      第 1 页顶部封面裁剪（题目+作者），供总结引用为图1
+  figures.json   图/表清单：id、标题全文、页码、裁剪文件、宽高比（首个条目为 cover）
   figures/       每个图/表的裁剪 PNG（200 dpi）
   pages/         每页整页预览 PNG（110 dpi），用于核对裁剪、扫描版兜底
-  meta.json      题目候选、页数、PDF 元数据
+  meta.json      题目候选、页数、PDF 元数据、link_candidates（第 1 页扫出的 arXiv/DOI 候选外链）
 """
 from __future__ import annotations
 
@@ -192,6 +193,38 @@ def guess_title(doc) -> str:
     return re.sub(r"\s+", " ", best)
 
 
+def cover_region(page) -> pymupdf.Rect:
+    """第 1 页封面区域：页面顶部到摘要起点（含题目与作者），找不到摘要时取上部 45%。"""
+    H = page.rect.height
+    limit = H * 0.45
+    for b in page.get_text("dict")["blocks"]:
+        if b["type"] != 0:
+            continue
+        t = block_text(b)
+        if b["bbox"][1] > H * 0.15 and re.match(r"(?i)^abstract\b|^摘\s*要", t):
+            limit = min(limit, b["bbox"][1] - 6)
+            break
+    limit = max(min(limit, H * 0.6), H * 0.12)
+    return pymupdf.Rect(page.rect.x0, page.rect.y0, page.rect.x1, limit)
+
+
+def link_candidates(page) -> list:
+    """从第 1 页文本扫出本文的候选外链（arXiv 编号 / DOI）。只扫第 1 页，
+    避免抓到参考文献里别人工作的 arXiv/DOI；结果供人工核实归属本文后再使用。"""
+    text = page.get_text()
+    found = []
+
+    def add(u):
+        if u not in found:
+            found.append(u)
+
+    for m in re.finditer(r"arXiv:\s*(\d{4}\.\d{4,5})(?:v\d+)?", text):
+        add(f"https://arxiv.org/abs/{m.group(1)}")
+    for m in re.finditer(r"(?i)\b(10\.\d{4,9}/[^\s\"'>,;)\]]+)", text):
+        add(f"https://doi.org/{m.group(1).rstrip('.,;')}")
+    return found[:5]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("pdf")
@@ -251,6 +284,14 @@ def main():
                               "width": pix.width, "height": pix.height,
                               "aspect": round(pix.width / pix.height, 3)})
             figures.append(entry)
+    # ---- 第 1 页封面（题目+作者），总结固定引用为全文图1
+    pix = doc[0].get_pixmap(dpi=FIG_DPI, clip=cover_region(doc[0]))
+    pix.save(out / "cover.png")
+    figures.insert(0, {"id": "cover", "kind": "cover", "label": "Cover",
+                       "caption": "论文第 1 页封面（题目与作者信息）", "page": 1,
+                       "file": "cover.png", "width": pix.width, "height": pix.height,
+                       "aspect": round(pix.width / pix.height, 3)})
+
     # 整页也登记成可引用的图（id: page3），供裁剪失败或需要展示整页时使用
     for pno in range(1, len(doc) + 1):
         figures.append({"id": f"page{pno}", "kind": "page", "label": f"Page {pno}",
@@ -260,6 +301,7 @@ def main():
         json.dumps(figures, ensure_ascii=False, indent=1), encoding="utf-8")
 
     meta = {"pdf": str(pdf.resolve()), "pages": len(doc), "title_guess": guess_title(doc),
+            "link_candidates": link_candidates(doc[0]),
             "pdf_metadata": {k: v for k, v in (doc.metadata or {}).items() if v},
             "text_chars": total_chars}
     (out / "meta.json").write_text(
@@ -267,7 +309,7 @@ def main():
 
     n_fig = sum(1 for f in figures if f["kind"] in ("fig", "tab", "alg"))
     n_fail = sum(1 for f in figures if f["kind"] in ("fig", "tab", "alg") and f.get("crop") is None)
-    log(f"完成：{len(doc)} 页，{total_chars} 字符，图/表/算法 {n_fig} 个（定位失败 {n_fail} 个）")
+    log(f"完成：{len(doc)} 页，{total_chars} 字符，图/表/算法 {n_fig} 个（定位失败 {n_fail} 个），封面 cover.png，候选外链 {meta['link_candidates']}")
     log(f"输出目录：{out}")
     print(json.dumps({"extract_dir": str(out), "figures": n_fig, "failed": n_fail,
                       "pages": len(doc)}, ensure_ascii=False))

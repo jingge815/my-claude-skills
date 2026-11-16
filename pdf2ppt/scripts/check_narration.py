@@ -24,13 +24,13 @@ SPOKEN_EN = re.compile(
 NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?![A-Za-z0-9_])")
 FILLER = ("卡住", "对症", "说白了", "所以呢", "说白", "咱们", "呃，", "嗯，", "那个那个")
 SECTIONS = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
-            "五.本文研究方法", "六.实验结果", "七.总结"]
+            "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
 NARRATION_MAX = 3000   # 15 分钟 × 200 字/分钟
 NARRATION_MIN = 2400
 NARRATION_TARGET_MIN = 2600
 COVER_MAX = 120
 PAGE_MIN, PAGE_MAX = 150, 480
-MIN_PAGES, MAX_PAGES = 10, 16
+MIN_PAGES, MAX_PAGES = 13, 17
 
 errors: list[str] = []
 warns: list[str] = []
@@ -84,7 +84,7 @@ def check(md_path: Path, extract: Path | None):
     joined = " → ".join(titles)
     for sec in SECTIONS:
         if not any(t.startswith(sec) for t in titles):
-            err(f"七节结构缺少「{sec}」对应的页：{joined[:80]}")
+            err(f"八节结构缺少「{sec}」对应的页：{joined[:80]}")
 
     # ---------- 2. 每页旁白 ----------
     total = 0
@@ -103,18 +103,24 @@ def check(md_path: Path, extract: Path | None):
             if not p.startswith("　　"):
                 err(f"第{num}页：旁白段落未以两个全角空格开头: {plain(p)[:24]}")
                 break
-        if num == 1 or num == len(pages):
+        if num == 1 or num == len(pages) or title.startswith("参考文献"):
             if n_chars > COVER_MAX:
-                warn(f"第{num}页（封面/结束页）旁白 {n_chars} 字，建议 ≤{COVER_MAX} 字，当前偏长")
+                warn(f"第{num}页（封面/参考文献/结束页）旁白 {n_chars} 字，建议 ≤{COVER_MAX} 字，当前偏长")
         elif n_chars < PAGE_MIN:
             warn(f"第{num}页「{title}」旁白仅 {n_chars} 字，这一页讲不满 1 分钟，考虑并页或充实内容")
         elif n_chars > PAGE_MAX:
             warn(f"第{num}页「{title}」旁白 {n_chars} 字，超过 {PAGE_MAX} 字，单页讲超过 2.5 分钟")
-        if title.startswith("七."):
+        if title.startswith("八."):
             body = "".join(plain(p) for p in paras)
             for word in ("不足", "启发"):
                 if word not in body:
                     err(f"第{num}页总结旁白没有讲到「{word}」——不足与启发是硬性要求")
+        if title.startswith("六."):
+            body = "".join(plain(p) for p in paras)
+            if "示例" not in body and "例子" not in body:
+                err(f"第{num}页示例说明旁白没有出现「示例/例子」——旁白要带着听众逐步推演")
+            if "图" not in body:
+                err(f"第{num}页示例说明旁白没有讲到图——流程图要逐步指着讲")
 
     # ---------- 3. 总字数 ----------
     print(f"[check] 旁白总字数 {total} 字（约 {total/200.0:.1f} 分钟）")

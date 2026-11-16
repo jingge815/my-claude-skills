@@ -39,7 +39,8 @@ except ImportError:
 # --------------------------------------------------------------------------
 # 模板只有 5 张蓝图，按 kind 取蓝图；同一 kind 的页可无限复用，
 # 论文方法讲几步、实验讲几组，都不需要改模板。
-BLUEPRINTS = {"cover": 1, "text-left": 2, "status": 3, "figure-left": 4, "closing": 5}
+BLUEPRINTS = {"cover": 1, "text-left": 2, "status": 3, "figure-left": 4, "closing": 5,
+              "refs": 2}  # 参考文献页复用 text-left 蓝图：删图槽、正文拉通全宽
 # 每类页的正文槽、总结槽、图槽（按模板蓝图页里标注的图序号）。
 KIND_SLOTS = {
     "text-left":   {"body": "文本框 31", "summary": "文本框 33", "figures": ["矩形 2"]},
@@ -874,6 +875,34 @@ def build_slide(tpl_xml, page):
             xml = force_align(xml, "文本框 3", "ctr")
         return xml
 
+    if kind == "refs":
+        # 参考文献页：与 PPT 内引用编号一一对应。复用 text-left 蓝图，
+        # 删掉图槽占位、清空总结槽，正文框拉通全宽，条目字号 12–14 磅自适应。
+        title = title or "参考文献"
+        xml = fill_shape(tpl_xml, SLOT_TITLE, [(0, [(title, 0)])], sz=page_title_size(title))
+        xml = remove_shape(xml, "矩形 2")
+        xml = clear_shape(xml, SLOT_SUMMARY)
+        xml = set_shape_box(xml, SLOT_BODY,
+                            x=int(round(1.13 / CM_PER_EMU)), y=int(round(4.13 / CM_PER_EMU)),
+                            cx=int(round(31.57 / CM_PER_EMU)), cy=int(round(12.40 / CM_PER_EMU)))
+        entries = [str(e).strip() for e in (page.get("refs") or []) if str(e).strip()]
+        page["_refs_n"] = len(entries)
+        if entries:
+            pt = fit_font_pt(entries, 31.0, 12.2, 14, 12)
+            page["_refs_pt"] = pt
+            body_block = find_shape(xml, SLOT_BODY) or ""
+            paras = shape_paragraphs(body_block)
+            tpl = paras[0] if paras else "<a:p><a:endParaRPr/></a:p>"
+            new = "".join(build_paragraph(tpl, [(e, 0)], sz=pt * 100, typeface=BODY_FACE)
+                          for e in entries)
+            body = TXBODY_RE.search(body_block).group(0)
+            open_tag = body[: body.index("<a:p>")] if "<a:p>" in body else body[: -len("</p:txBody>")]
+            xml = xml.replace(body_block, body_block.replace(body, open_tag + new + "</p:txBody>"))
+        else:
+            xml = clear_shape(xml, SLOT_BODY)
+        xml = set_autofit(xml, SLOT_BODY, "noAutofit")
+        return xml
+
     # 正文页：左文右图 / 现状（左文右两图） / 左图右文
     xml = fill_shape(tpl_xml, SLOT_TITLE, [(0, [(title, 0)])], sz=page_title_size(title))
 
@@ -1495,12 +1524,13 @@ def write_narration(pages, narr, path, doc_title=None):
         fh.write("\n".join(lines) + "\n")
 
 
-# 论文总结固定七节：标题前缀必须按此顺序出现（同节可多页）
+# 论文总结固定八节：标题前缀必须按此顺序出现（同节可多页）
 SECTION_ORDER = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
-                 "五.本文研究方法", "六.实验结果", "七.总结"]
-# 各节最少页数：方法要有原理页 + 步骤页，实验要有主结果页 + 分析页
-SECTION_MIN_PAGES = {"五.本文研究方法": 2, "六.实验结果": 2}
-MIN_PAGES, MAX_PAGES = 10, 16
+                 "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
+# 各节最少页数：方法要有原理页 + 步骤页，示例说明至少 1 页，实验要主结果 + 分析
+SECTION_MIN_PAGES = {"五.本文研究方法": 2, "六.示例说明": 1, "七.实验结果": 2}
+MIN_PAGES, MAX_PAGES = 13, 17
+REFS_MAX_ENTRIES = 10   # 参考文献页最多 10 条（只列 PPT 里引用过的）
 
 
 def check_content_rules(index, page):
@@ -1521,6 +1551,17 @@ def check_content_rules(index, page):
             out.append("第%d页：封面缺副标题，应写「发表于 会议/期刊 年份（级别）· 论文总结汇报」" % index)
         elif not re.search(r"(19|20)\d{2}", sub):
             out.append("第%d页：封面副标题缺年份：%s" % (index, sub[:30]))
+        return out
+    if kind == "refs":
+        entries = [str(e).strip() for e in (page.get("refs") or []) if str(e).strip()]
+        if not entries:
+            out.append("第%d页：参考文献页没有条目（refs 数组为空）" % index)
+        for e in entries:
+            if not re.match(r"^\[\d+\]", e):
+                out.append("第%d页：参考文献条目须以 [N] 开头与引用对应：%s" % (index, e[:24]))
+        if len(entries) > REFS_MAX_ENTRIES:
+            out.append("第%d页：参考文献 %d 条，超过 %d 条上限（只列 PPT 里引用过的）"
+                       % (index, len(entries), REFS_MAX_ENTRIES))
         return out
     if kind == "closing":
         if not (page.get("summary") or "").strip():
@@ -1543,8 +1584,13 @@ def check_content_rules(index, page):
         if not re.search(r"\[\d+\]|et al\.|等人|〔\d+〕|［\d+］", body):
             out.append("第%d页：现状页要点没有原文引用标记（如 [12]、AttAcc [2]），"
                        "每类方法都要落到具体文献" % index)
+    # 示例说明页：用小例子贯穿方法，逐步推演到结果（关键项）
+    if title.startswith("六."):
+        body = " ".join(point_text(pt) for pt in points) + (page.get("summary") or "")
+        if "示例" not in body and "例子" not in body:
+            out.append("第%d页：示例说明页要点没有出现「示例/例子」——这页是用小例子贯穿方法" % index)
     # 总结页：必须提炼不足与启发（关键项）
-    if title.startswith("七."):
+    if title.startswith("八."):
         body = " ".join(point_text(pt) for pt in points) + summary
         for word, hint in (("不足", "本文的不足/局限"), ("启发", "对后续研究或自己工作的启发")):
             if word not in body and not any(word in s for pt in points for s in normalize_point(pt)["subs"]):
@@ -1593,12 +1639,19 @@ def check_figure_fit(index, page):
 
 
 def check_structure(pages):
-    """整份 PPT 的章节结构：七节齐全有序、方法与实验至少 2 页、页数范围。"""
+    """整份 PPT 的章节结构：八节齐全有序、方法与实验至少 2 页、参考文献页在总结后、页数范围。"""
     out = []
     if not pages or pages[0].get("kind") != "cover":
         out.append("第 1 页必须是封面（kind=cover）")
     if not pages or pages[-1].get("kind") != "closing":
         out.append("最后一页必须是结束页（kind=closing）")
+    n_refs = sum(1 for p in pages if p.get("kind") == "refs")
+    if n_refs == 0:
+        out.append("缺少参考文献页（kind=refs，放在八.总结之后、结束页之前）")
+    elif n_refs > 1:
+        out.append("参考文献页只能有 1 页，当前 %d 页" % n_refs)
+    elif len(pages) < 2 or pages[-2].get("kind") != "refs":
+        out.append("参考文献页应紧邻结束页之前（倒数第二页），当前不在该位置")
     titles = [p.get("title") or "" for p in pages[1:-1] if p.get("kind") in KIND_SLOTS]
     if len(pages) < MIN_PAGES or len(pages) > MAX_PAGES:
         out.append("总页数 %d，应在 %d–%d 页（15 分钟讲不完更多页）" % (len(pages), MIN_PAGES, MAX_PAGES))
@@ -1635,6 +1688,8 @@ def report(pages, narr, out_path):
         n_chars = sum(len(point_text(p)) for p in points)
         line = "  第%2d页 [%-12s] %s" % (i, page.get("kind"), title)
         line += "  要点%d条/%d字" % (len(points), n_chars)
+        if page.get("kind") == "refs":
+            line += "  文献%d条/%d磅" % (page.get("_refs_n", 0), page.get("_refs_pt", 0))
         if page.get("_body_pt"):
             line += "  正文%d磅" % page["_body_pt"]
         if page.get("summary"):
@@ -1716,6 +1771,8 @@ def report(pages, narr, out_path):
         if fig and fig != FIG_PLACEHOLDER and not has_fig:
             if isinstance(fig, dict) or (isinstance(fig, str) and os.path.exists(fig)):
                 warn.append("第%d页：图表未成功嵌入，槽位退回文字说明" % i)
+        if has_fig and "图" not in (narr(i) or ""):
+            warn.append("第%d页：有图但旁白没有提到图——每张图都要在旁白里解释（是什么/怎么看/说明什么）" % i)
     total = sum(len(narr(i)) for i in range(1, len(pages) + 1))
     if total:
         print("旁白总字数：%d 字（目标 %d–%d 字，约 %.1f 分钟）" % (total, NARRATION_MIN, NARRATION_MAX, total / 200.0))

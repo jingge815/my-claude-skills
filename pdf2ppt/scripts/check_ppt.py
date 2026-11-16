@@ -3,8 +3,9 @@
 用法: .venv/bin/python scripts/check_ppt.py 论文总结PPT.pptx --content content.json
 
 错误(E)必须修复（改 content.json 后重新生成）；警告(W)逐条确认后可放行。
-覆盖：页数与七节结构、封面/结束页字段、模板占位残留、每个内容页图文都有、
-正文要点条数与最小字号、图文不重叠、旁白已写入备注页且与旁白稿一致。
+覆盖：页数与八节结构（含六.示例说明）、封面/结束页字段、模板占位残留、每个内容页
+图文都有、概述页论文网址、有图页旁白必须讲图、正文要点条数与最小字号、图文不重叠、
+旁白已写入备注页且与旁白稿一致。
 """
 from __future__ import annotations
 
@@ -20,7 +21,10 @@ from pptx.util import Emu
 
 CM = 360000
 SECTION_ORDER = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
-                 "五.本文研究方法", "六.实验结果", "七.总结"]
+                 "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
+# 各节最少页数：方法要原理+步骤，示例说明至少 1 页，实验要主结果+分析
+SECTION_MIN_PAGES = {"五.本文研究方法": 2, "六.示例说明": 1, "七.实验结果": 2}
+MAX_EXAMPLE_PAGES = 2   # 示例说明最多 2 页，多了挤占正片时长
 KIND_WITH_SUMMARY = ("text-left", "figure-left")
 # 模板槽位形状名：这些之外的形状都算「图」的组成部分
 SLOT_NAMES = {"文本框 1", "文本框 31", "文本框 33", "矩形 2", "矩形 8",
@@ -31,7 +35,12 @@ PLACEHOLDER_RESIDUE = ("（楷体", "（微软雅黑", "（等线", "xxx", "Xxx"
 THANKS_REQUIRED = "感谢聆听"
 THANKS_FORBIDDEN = ("批评指正", "欢迎指正", "谢谢大家", "敬请指正")
 RED_HEX = "C00000"
-MIN_PAGES, MAX_PAGES = 10, 16
+MIN_PAGES, MAX_PAGES = 13, 17
+# 嵌入原图的有效 DPI 下限（figure-spec：≥110 直接用；95–110 偏软须注明；<95 不许硬嵌）
+DPI_HARD = 95.0
+DPI_SOFT = 110.0
+# 概述页须给出论文外网链接（核实后的 arXiv/DOI）；确无公开链接时如实标注
+URL_MARK = ("http", "arxiv.org", "doi.org", "未找到公开链接", "无公开链接")
 
 
 def disp_w(text):
@@ -69,6 +78,21 @@ def texts_of(slide):
     return out
 
 
+def collect_strings(obj):
+    """递归取出 page dict 里所有字符串（要点/二级行/总结/图 spec 文字），供引用编号收集。"""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from collect_strings(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from collect_strings(v)
+
+
+CITE_RE = re.compile(r"\[(\d{1,3})\]")
+
+
 def check(pptx_path: Path, content: dict):
     pages = content.get("pages") or []
     narration = content.get("narration") or {}
@@ -80,8 +104,8 @@ def check(pptx_path: Path, content: dict):
             return (narration[i - 1] or "").strip()
         return ""
 
-    if not pptx_path.name.isascii():
-        err(f"输出文件名必须全为英文/数字/连字符：{pptx_path.name}")
+    if not pptx_path.name.endswith("-slide.pptx"):
+        warn(f"输出文件名应为「论文题目-slide.pptx」，当前：{pptx_path.name}")
 
     prs = Presentation(str(pptx_path))
     slides = list(prs.slides)
@@ -119,11 +143,35 @@ def check(pptx_path: Path, content: dict):
                         err(f"第{i}页形状「{sh.name}」字号 {r.font.size.pt:g} 磅异常"
                             f"（合法上限 44 磅）——检查 build_ppt 的 sz 单位（1/100 磅）")
 
+    cited = set()        # 全片正文里出现过的引用编号 [N]
+    covered = set()      # 参考文献页列出的编号
+    n_refs_pages = 0
     for i, (slide, page) in enumerate(zip(slides, pages), start=1):
         kind = page.get("kind") or ""
         title = page.get("title") or ""
         if kind in ("cover", "closing"):
             continue
+
+        if kind == "refs":
+            # 参考文献页：条目与全片引用编号一一对应；不走图文/红粗/总结那套内容页规则
+            n_refs_pages += 1
+            entries = [str(e).strip() for e in (page.get("refs") or []) if str(e).strip()]
+            covered |= {int(m.group(1)) for e in entries for m in CITE_RE.finditer(e)}
+            body = " ".join(tf.text for _, tf in texts_of(slide))
+            missing_on_slide = [e for e in entries if re.sub(r"\s+", "", e)[:40] not in re.sub(r"\s+", "", body)]
+            if missing_on_slide:
+                err(f"第{i}页参考文献有 {len(missing_on_slide)} 条没有出现在成品页面上（溢出或未渲染）")
+            if not entries:
+                err(f"第{i}页参考文献没有任何条目")
+            if slide.has_notes_slide:
+                got = slide.notes_slide.notes_text_frame.text.strip()
+                if got and re.sub(r"\s+", "", got) != re.sub(r"\s+", "", narr(i)):
+                    err(f"第{i}页备注旁白与 content.json 不一致")
+            elif narr(i):
+                err(f"第{i}页没有备注页，旁白未写入")
+            continue
+
+        cited |= {int(m.group(1)) for m in CITE_RE.finditer(" ".join(collect_strings(page)))}
         for sec in SECTION_ORDER:
             if title.startswith(sec):
                 seq.append(sec)
@@ -151,6 +199,21 @@ def check(pptx_path: Path, content: dict):
                 summary_sh = sh
         if not pics and len(fig_shapes) < 4:
             err(f"第{i}页没有检测到图（无图片、自绘形状仅 {len(fig_shapes)} 个），每个内容页都要图文都有")
+        # 嵌入原图按实际放置尺寸折算有效 DPI（figure-spec 判据）
+        for sh in pics:
+            try:
+                w_px = sh.image.size[0]
+                w_in = (sh.width or 0) / 914400.0
+                if w_px and w_in > 0.1:
+                    dpi = w_px / w_in
+                    if dpi < DPI_HARD:
+                        err(f"第{i}页图片「{sh.name}」有效 DPI 仅 {dpi:.0f}（<{DPI_HARD:.0f}），"
+                            f"不要硬嵌：换原图/裁剪/按原结构重排")
+                    elif dpi < DPI_SOFT:
+                        warn(f"第{i}页图片「{sh.name}」有效 DPI {dpi:.0f} 偏软（95–110），"
+                             f"投影可能模糊，须在生成说明注明")
+            except Exception:
+                pass
         if body_sh is None:
             err(f"第{i}页找不到正文槽（文本框 31）")
         else:
@@ -223,6 +286,14 @@ def check(pptx_path: Path, content: dict):
                     err(f"第{i}页正文与图「{sh.name}」重叠 {ov/CM/CM:.2f} cm²")
                     break
 
+        # 概述页必须给出论文外网链接（meta.json 的 link_candidates 核实后写入）
+        if title.startswith("一.") and not any(m in all_text for m in URL_MARK):
+            err(f"第{i}页概述没有论文网址（arXiv/DOI 链接）；确无公开链接就写「未找到公开链接」")
+
+        # 有图的页，旁白必须讲这张图（是什么/怎么看/说明什么），不能只放图不解释
+        if (pics or len(fig_shapes) >= 4) and "图" not in narr(i):
+            err(f"第{i}页有图但旁白没有提到图——每张图都要在旁白里解释清楚")
+
         # 备注页旁白
         if slide.has_notes_slide:
             got = slide.notes_slide.notes_text_frame.text.strip()
@@ -234,7 +305,21 @@ def check(pptx_path: Path, content: dict):
         else:
             err(f"第{i}页没有备注页，旁白未写入")
 
-    # ---------- 七节结构 ----------
+    # ---------- 参考文献页 ----------
+    if n_refs_pages == 0:
+        err("缺少参考文献页（kind=refs）：全片引用的 [N] 必须能对上出处")
+    elif n_refs_pages > 1:
+        err(f"参考文献页只能 1 页，当前 {n_refs_pages} 页")
+    elif len(pages) < 2 or pages[-2].get("kind") != "refs":
+        err("参考文献页应放在八.总结之后、紧邻结束页之前（倒数第二页）")
+    lack = sorted(cited - covered)
+    if lack:
+        err(f"正文引用了 [{','.join(str(n) for n in lack)}]，参考文献页没有对应条目——编号必须一一对应")
+    extra = sorted(covered - cited)
+    if extra:
+        warn(f"参考文献页列了未被正文引用的编号 [{','.join(str(n) for n in extra)}]，建议只列引用过的")
+
+    # ---------- 八节结构 ----------
     order_idx = [SECTION_ORDER.index(s) for s in seq]
     if order_idx != sorted(order_idx):
         err(f"章节顺序错乱：{' → '.join(seq)}")
@@ -242,10 +327,10 @@ def check(pptx_path: Path, content: dict):
         n = seq.count(sec)
         if n == 0:
             err(f"缺少章节「{sec}」")
-        elif sec.startswith("五.") and n < 2:
-            err(f"「{sec}」只有 {n} 页，至少要原理页 + 步骤页 2 页")
-        elif sec.startswith("六.") and n < 2:
-            err(f"「{sec}」只有 {n} 页，至少要主结果 + 分析 2 页")
+        elif n < SECTION_MIN_PAGES.get(sec, 1):
+            err(f"「{sec}」只有 {n} 页，至少 {SECTION_MIN_PAGES[sec]} 页")
+        elif sec == "六.示例说明" and n > MAX_EXAMPLE_PAGES:
+            err(f"「{sec}」有 {n} 页，最多 {MAX_EXAMPLE_PAGES} 页（示例是助讲，不是正片）")
 
     # ---------- 致谢：最后一页固定「感谢聆听」，禁止批评指正类套话 ----------
     if slides:
