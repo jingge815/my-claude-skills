@@ -1,0 +1,55 @@
+# devflow 角色配置模板。复制为 config.toml 后按需修改；config.toml 已被 .gitignore 忽略，不入 git。
+# 引擎统一为 claude CLI，用 --settings 指向不同厂商的配置文件切换账号；
+# kimi / codex 引擎沿用 review-fix-loop 的账号登录方式，需要时把 engine 改为对应值。
+# 密钥不写在这里：claude 引擎的密钥在各 settings 文件的 env 中，kimi/codex 用账号登录态。
+#
+# 可用字段（每个角色）：
+#   engine    = "claude" | "kimi" | "codex"
+#   settings  = claude 引擎的 --settings 文件路径（切换厂商就改这一行）
+#   model     = 可选，留空用 settings/CLI 默认
+#   args      = 可选，追加命令行参数
+#   env       = 可选，追加环境变量
+#   proxy     = 是否需要代理（codex 通常需要 true；代理命令配在 review-fix-loop/config.toml [proxy]）
+#   in_session = 可选，仅 [[panel.*]] 条目支持：true 时该候选在当前会话内用 Agent 子代理跑，不启动外部 CLI
+
+# ---- 主决策：分配任务、比较需求/设计候选、裁决、评审把关 ----
+[leader]
+engine   = "claude"
+settings = "~/.claude/settings.json.glm"
+
+# ---- 弱干活：写需求文档、设计文档 ----
+[worker.doc]
+engine   = "claude"
+settings = "~/.claude/settings.json.glm"
+
+# ---- 弱干活：实际编码（TDD 实施） ----
+[worker.code]
+engine   = "claude"
+settings = "~/.claude/settings.json.glm"
+
+# ---- 多候选面板：列表配置，几个条目就并行几路（arena 需求/设计多候选、interrogate 对抗评审）----
+# 每个条目一个候选/攻击者；调用量：python3 dev-flow/agents.py run arena:<name> ...
+[[panel.arena]]
+name     = "glm"
+engine   = "claude"
+settings = "~/.claude/settings.json.glm"
+
+[[panel.arena]]
+name     = "deepseek"
+engine   = "claude"
+settings = "~/.claude/settings.json.deepseek"
+
+# 需要第三路时按同样格式追加，例如：
+# [[panel.arena]]
+# name     = "kimi"
+# engine   = "kimi"
+
+[[panel.interrogate]]
+name     = "glm"
+engine   = "claude"
+settings = "~/.claude/settings.json.glm"
+
+# [[panel.interrogate]]
+# name     = "deepseek"
+# engine   = "claude"
+# settings = "~/.claude/settings.json.deepseek"

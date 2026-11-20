@@ -9,6 +9,7 @@
 """
 import argparse
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 import os
@@ -42,6 +43,22 @@ class LoopStop(Exception):
 
 def log(msg):
     print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+DECISIONS_HEADER = "ts\tphase\tdecision\twhy\tevidence\tresult"
+
+
+def log_decision(docs_dir, phase, decision, why, evidence, result):
+    """决策日志（show-me-your-work 格式）：append-only 写入 docs 目录 decisions.tsv。"""
+    path = Path(docs_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    path = path / "decisions.tsv"
+    row = [dt.datetime.now().isoformat(timespec="seconds"), phase, decision, why, str(evidence), result]
+    row = [c.replace("\t", " ").replace("\n", " ") for c in row]
+    if not path.exists():
+        path.write_text(DECISIONS_HEADER + "\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\t".join(row) + "\n")
 
 
 def load_json_lenient(path):
@@ -108,14 +125,17 @@ class Role:
         elif self.engine == "claude":
             self.env.setdefault("CLAUDE_CODE_EFFORT_LEVEL", "max")
         self.proxy_env = proxy_env or {}
+        self.settings_path = None
         if self.engine == "claude":
             self._init_claude(cfg)
 
     def _init_claude(self, cfg):
         env = {}
-        if cfg.get("settings_file"):
-            src = Path(os.path.expanduser(cfg["settings_file"]))
-            env.update(load_json_lenient(src).get("env", {}))
+        # settings 既作为 --settings 传给 CLI，也从其 env 读取网关配置
+        ref = cfg.get("settings") or cfg.get("settings_file")
+        if ref:
+            self.settings_path = Path(os.path.expanduser(ref)).resolve()
+            env.update(load_json_lenient(self.settings_path).get("env", {}))
         env.update(self.env)
         if cfg.get("base_url"):
             env["ANTHROPIC_BASE_URL"] = cfg["base_url"]
@@ -178,7 +198,9 @@ class Role:
         if self.engine == "claude":
             # stream-json 会记录每一步工具调用，便于在日志中确认加载了哪些技能
             cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-                   "--permission-mode", "bypassPermissions", "--no-session-persistence"]
+                   "--dangerously-skip-permissions", "--no-session-persistence"]
+            if self.settings_path:
+                cmd += ["--settings", str(self.settings_path)]
             if max_turns:
                 cmd += ["--max-turns", str(max_turns)]
             for d in self.add_dirs:
@@ -296,8 +318,12 @@ def untracked_files(spec, docs_dir=None):
     return sorted(git(spec.path, "ls-files", "--others", "--exclude-standard", "--", ".", *ex).splitlines())
 
 
-def code_fingerprint(specs, docs_dir):
-    """各仓库评审范围内 docs/ 以外代码的指纹，用于确认评审过程没有修改代码。"""
+def code_fingerprint(specs, docs_dir, fp_exclude=()):
+    """各仓库评审范围内 docs/ 以外代码的指纹，用于确认评审过程没有修改代码。
+
+    未跟踪的运行产物（runs/、bundles/、缓存等）可由测试或后台任务刷新，
+    不算代码改动；fp_exclude 里的前缀或通配模式从指纹中排除。
+    """
     h = hashlib.sha256()
     for spec in specs:
         repo = spec.path
@@ -307,6 +333,8 @@ def code_fingerprint(specs, docs_dir):
         h.update(committed_diff(spec, docs_dir).encode())
         h.update(worktree_diff(spec, docs_dir).encode())
         for f in untracked_files(spec, docs_dir):
+            if any(f.startswith(p) or fnmatch.fnmatch(f, p) for p in fp_exclude):
+                continue
             h.update(f.encode())
             p = repo / f
             if p.is_file():
@@ -460,6 +488,19 @@ CONTRACT = {
 ---
 以下为自动迭代程序的固定约定：当前无人值守，不要向用户提问；技术文档写到 {docs_dir}。
 """,
+    "interrogate": """
+---
+以下为自动迭代程序的固定约定，优先于上文：
+1. 无人值守，不要向用户提问，也不要等待确认。
+2. 本次对抗评审的代码范围（以每个仓库的实际 git 结果为准）：
+{review_scope}
+3. 你是攻击者：设法证明这段改动存在真实的行为缺陷。每条 finding 必须附真实运行证据
+   （失败测试、复现脚本、或命令及其输出）；跑不出证据的不要写。风格、命名、结构问题不要报。
+4. 报告必须写到 {review_file}（本次固定文件名，不要使用其他文件名）。
+5. 问题标题必须使用"### 问题N（严重/高/中/低）: ……"格式，程序依赖该格式统计问题数量；
+   没有发现问题时在报告中明确写"无确认问题"。
+6. 只写报告，不得修改 {docs_dir} 以外的任何文件；复现脚本与临时文件放 /tmp。
+""",
 }
 
 
@@ -486,6 +527,48 @@ def last_review_round(docs_dir, req_id):
     rounds = [int(m.group(1)) for f in docs_dir.glob(f"review-{req_id}-*-round*.md")
               if (m := re.search(r"-round(\d+)\.md$", f.name))]
     return max(rounds, default=0)
+
+
+def load_interrogators(loop_cfg, add_dirs, skills_dir):
+    """从 dev-flow/config.toml 的 [[panel.interrogate]] 读取对抗评审攻击者角色。"""
+    path = Path(os.path.expanduser(loop_cfg.get(
+        "interrogate_config", str(DEFAULT_SKILLS_DIR / "dev-flow" / "config.toml"))))
+    if not path.exists():
+        raise LoopStop(f"interrogate 已开启但找不到 {path}")
+    dcfg = tomllib.loads(path.read_text(encoding="utf-8"))
+    entries = (dcfg.get("panel") or {}).get("interrogate") or []
+    if not entries:
+        raise LoopStop(f"{path} 中没有 [[panel.interrogate]] 条目")
+    return [Role(f"interrogate-{ent.get('name', i)}", ent, add_dirs, skills_dir, None)
+            for i, ent in enumerate(entries)]
+
+
+def interrogate_pass(interrogators, template, common, workdir, docs_dir, req_id,
+                     run_dir, timeout_s, specs, fp_exclude):
+    """多个攻击者并行各写一份对抗评审报告；返回（报告路径列表, 各级别问题数合计）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    today = dt.date.today().strftime("%Y%m%d")
+
+    def attack(role):
+        short = role.name.split("-", 1)[1] if "-" in role.name else role.name
+        report = docs_dir / f"interrogate-{req_id}-{today}-{short}.md"
+        role.run(render(template, {**common, "review_file": report}),
+                 workdir, run_dir / f"{role.name}.log", timeout_s)
+        return role, report
+
+    files, total = [], {k: 0 for k in LEVELS}
+    with ThreadPoolExecutor(max_workers=len(interrogators)) as pool:
+        for role, report in pool.map(attack, interrogators):
+            if not report.exists():
+                raise LoopStop(f"{role.name} 没有生成 {report.name}")
+            shutil.copy2(report, run_dir / report.name)
+            counts = count_issues(report.read_text(encoding="utf-8"))
+            for k in LEVELS:
+                total[k] += counts[k]
+            files.append(report)
+            log(f"{role.name} 完成：{fmt_counts(counts)}（{report.name}）")
+    return files, total
 
 
 def main():
@@ -516,6 +599,14 @@ def main():
 
     preflight(workdir, specs, docs_dir, req_id, roles)
     if args.check:
+        if loop_cfg.get("interrogate", False):
+            interrogators = load_interrogators(loop_cfg, add_dirs, skills_dir)
+            ping_dir = CACHE_DIR / "ping"
+            ping_dir.mkdir(parents=True, exist_ok=True)
+            for role in interrogators:
+                log(f"连通测试 {role.describe()}")
+                result = role.run("只回复两个字母：OK", workdir, ping_dir / f"{role.name}.log", 300, max_turns=1)
+                log(f"  返回：{result.strip()[:40]}")
         log("准备检查通过")
         return
 
@@ -534,6 +625,7 @@ def main():
     block_levels = loop_cfg.get("block_levels", ["严重", "高"])
     if not block_levels or set(block_levels) - set(LEVELS):
         raise SystemExit(f"block_levels 只能取 {LEVELS} 中的值")
+    fp_exclude = tuple(cfg["project"].get("fingerprint_exclude", []))
     block_name = "、".join(block_levels)
     round_base = last_review_round(docs_dir, req_id)
 
@@ -548,10 +640,10 @@ def main():
 
             # 评审：每次都是全新进程、全新对话，结束后不保留会话
             log(f"第 {no} 轮评审开始（{roles['reviewer'].engine}）")
-            before_fp = code_fingerprint(specs, docs_dir)
+            before_fp = code_fingerprint(specs, docs_dir, fp_exclude)
             started = dt.datetime.now().timestamp()
             roles["reviewer"].run(render(templates["reviewer"], values), workdir, rdir / "review.log", timeout_s)
-            if code_fingerprint(specs, docs_dir) != before_fp:
+            if code_fingerprint(specs, docs_dir, fp_exclude) != before_fp:
                 (rdir / "reviewer-changes.patch").write_text(all_diffs(specs), encoding="utf-8")
                 raise LoopStop("评审过程修改了 docs 以外的代码，已停止，改动见 reviewer-changes.patch")
             if not review.exists() or review.stat().st_mtime < started:
@@ -561,6 +653,8 @@ def main():
             history.append((review.name, counts))
             blocking = sum(counts[k] for k in block_levels)
             log(f"第 {no} 轮评审结果：{fmt_counts(counts)}（{review.name}）")
+            log_decision(docs_dir, "review", f"round {no} 评审完成", "评审-修复自动迭代",
+                         review.name, fmt_counts(counts))
             if sum(counts.values()) == 0:
                 outcome = f"通过：第 {no} 轮评审没有任何问题"
                 break
@@ -584,6 +678,8 @@ def main():
                 raise LoopStop("修复进程没有输出 LOOP_STATUS，见 fix.log")
             if status[-1] == "NEED_HUMAN":
                 raise LoopStop("修复进程报告存在需要人工确认的事项，见实施文档待确认事项")
+            log_decision(docs_dir, "fix", f"round {no} 修复完成", "评审-修复自动迭代",
+                         implement.name, f"status={status[-1]}")
             if final:
                 outcome = (f"通过：第 {no} 轮评审没有{block_name}级别问题，"
                            f"剩余问题已在本轮修复，不再进行新一轮评审")
@@ -592,6 +688,63 @@ def main():
             outcome = f"停止：达到最大轮数仍有{block_name}级别问题"
     except LoopStop as e:
         outcome = f"停止：{e}"
+
+    # 对抗评审阶段（可选）：阻塞级清零后追加一轮多模型攻击，finding 必须有运行证据
+    if outcome.startswith("通过") and loop_cfg.get("interrogate", False):
+        try:
+            interrogators = load_interrogators(loop_cfg, add_dirs, skills_dir)
+            itpl = build_template("interrogate", cfg.get("interrogate", {}), "prompts/interrogate.md")
+            log(f"对抗评审开始：{len(interrogators)} 个攻击者并行")
+            before_fp = code_fingerprint(specs, docs_dir, fp_exclude)
+            ifiles, icounts = interrogate_pass(interrogators, itpl, common, workdir, docs_dir,
+                                               req_id, run_dir, timeout_s, specs, fp_exclude)
+            if code_fingerprint(specs, docs_dir, fp_exclude) != before_fp:
+                raise LoopStop("对抗评审过程修改了 docs 以外的代码")
+            names = "、".join(p.name for p in ifiles)
+            log(f"对抗评审结果：{fmt_counts(icounts)}（{names}）")
+            log_decision(docs_dir, "interrogate", "对抗评审完成", "多模型攻击，finding 须运行证据",
+                         names, fmt_counts(icounts))
+            if sum(icounts.values()) > 0:
+                # 对抗发现的问题走一次修复，再跑一轮普通评审确认无回归
+                implement = find_doc(docs_dir, "implement", req_id)
+                values = {**common, "round": "interrogate", "implement_file": implement,
+                          "review_file": names}
+                log("对抗评审问题修复开始")
+                result = roles["fixer"].run(render(templates["fixer"], values), workdir,
+                                            run_dir / "interrogate-fix.log", timeout_s)
+                st = STATUS_RE.findall(result)
+                if not st:
+                    raise LoopStop("对抗评审修复进程没有输出 LOOP_STATUS")
+                if st[-1] == "NEED_HUMAN":
+                    raise LoopStop("对抗评审修复进程报告需要人工确认")
+                log_decision(docs_dir, "fix", "对抗评审问题修复完成", "interrogate finding 修复",
+                             implement.name, f"status={st[-1]}")
+                no = last_review_round(docs_dir, req_id) + 1
+                rdir = run_dir / f"round-{no:02d}"
+                rdir.mkdir()
+                review = docs_dir / f"review-{req_id}-{dt.date.today():%Y%m%d}-round{no:02d}.md"
+                values = {**common, "round": no, "implement_file": find_doc(docs_dir, "implement", req_id),
+                          "review_file": review}
+                log(f"对抗评审后确认轮（round {no}）开始")
+                started = dt.datetime.now().timestamp()
+                roles["reviewer"].run(render(templates["reviewer"], values), workdir,
+                                      rdir / "review.log", timeout_s)
+                if not review.exists() or review.stat().st_mtime < started:
+                    raise LoopStop(f"确认轮没有生成 {review.name}")
+                shutil.copy2(review, rdir / review.name)
+                counts = count_issues(review.read_text(encoding="utf-8"))
+                history.append((review.name, counts))
+                blocking = sum(counts[k] for k in block_levels)
+                log(f"确认轮结果：{fmt_counts(counts)}（{review.name}）")
+                log_decision(docs_dir, "review", f"round {no} 确认轮完成", "对抗评审修复后的回归确认",
+                             review.name, fmt_counts(counts))
+                if blocking > 0:
+                    raise LoopStop(f"对抗评审修复后确认轮仍有{block_name}级别问题，需人工介入")
+                outcome += f"；对抗评审发现 {sum(icounts.values())} 个问题已修复，确认轮无阻塞问题"
+            else:
+                outcome += "；对抗评审无确认问题"
+        except LoopStop as e:
+            outcome = f"停止（对抗评审）：{e}"
 
     if outcome.startswith("通过") and loop_cfg.get("run_techdoc", False):
         log("生成最终技术文档")
