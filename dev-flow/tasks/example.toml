@@ -1,0 +1,103 @@
+# dev-flow 任务配置样例 —— 一个需求任务一份 toml，复制为 <需求标识>.toml 后填写。
+# 本目录除 example.toml 外已被 .gitignore 忽略：真实路径、原始 prompt 只写在你的任务配置里。
+# 运行：
+#   python3 ~/.claude/skills/dev-flow/flow.py -c <本文件> --check   # 先校验（不调模型）
+#   python3 ~/.claude/skills/dev-flow/flow.py -c <本文件>           # 一键全流程
+#   python3 ~/.claude/skills/dev-flow/flow.py -c <本文件> --resume  # 断点续跑
+
+# ---------------------------------------------------------------- 任务与原始 prompt
+[task]
+req_id = "demo-feature"        # 需求标识：文档命名、worktree、run 目录都挂在它下面
+# original_prompt 与 prompt_file 二选一。原始 prompt 建议包含：背景 / 核心目标（编号列表）/
+# 参考代码（各仓路径与角色）/ 思路（可借鉴文档）/ 验证（命令清单）。
+original_prompt = """
+背景：……（一段话说清为什么要做这件事）
+核心目标：
+1. ……；
+2. ……；
+3. ……。
+参考代码：
+/path/to/workspace/repo-a    主工作仓
+/path/to/workspace/repo-b    配套仓
+验证：
+- repo-a: python -m pytest tests/ -q（快速回归）
+- repo-b: ./run_tests.sh
+"""
+# prompt_file = "/path/to/prompt.md"      # 原始 prompt 太长时放文件里
+# date = "20261121"                       # 文档日期后缀，默认运行当天；已有文档时自动沿用其日期
+# request_file = "docs/request-xxx.md"    # 已有需求文档时指定，S0/S1 自动跳过
+# design_file  = "docs/design-xxx.md"     # 已有设计文档时指定，S2 自动跳过
+
+# ---------------------------------------------------------------- 仓库与 worktree
+[project]
+workdir = "/path/to/workspace"             # 各仓公共父目录（相对路径以它为基准）
+repos = [                                  # 参与改动的仓库；role 会写进各阶段提示词
+  { path = "repo-a", role = "主工作仓，docs 所在地" },
+  { path = "repo-b", role = "配套仓" },
+]
+# docs_repo = "repo-a"                    # docs 目录所在仓，默认第一个
+# docs_dir  = "/path/to/workspace/repo-a/docs"   # 显式指定 docs 目录（默认 <docs仓>/docs）
+readonly_paths = ["/path/to/vendor-sdk"]   # 只读参考路径，会授予外部进程只读访问
+reference_docs = [                         # 可借鉴思路的文档，进 S1/S2 提示词
+  "docs/design-legacy-20260101.md",
+]
+use_worktree = true                        # 默认 true：worktrees/<req_id>/<仓库名>/，多任务互不干扰
+worktree_parent = "/path/to/workspace/worktrees"   # 默认 <workdir>/worktrees
+# fingerprint_exclude = ["runs/", "*.log", "build/"]   # S4 评审改动指纹排除（有默认值）
+
+# ---------------------------------------------------------------- 核心目标与验证（逐字注入每个阶段的提示词）
+[goals]
+core_goals = """
+1. ……（与原始 prompt 的核心目标一致，逐字）；
+2. ……；
+3. ……。
+"""
+verify_commands = """
+- repo-a: python -m pytest tests/ -q（快速回归，可反复跑）
+- repo-a: python -m pytest tests/ -q -k "e2e"（端到端，收尾跑一次）
+- repo-b: ./run_tests.sh
+- 禁止：小时级命令、全量重跑（除非收尾阶段一次）
+"""
+boundaries = "本期不做 ……；…… 的历史行为不算问题。"   # 边界与非目标，进评审提示词
+
+# ---------------------------------------------------------------- 各阶段使用的角色（名字引用全局 dev-flow/config.toml）
+[roles]
+# sharpen        = "leader"        # S0 锐化，默认 leader
+# requirement    = "worker:doc"    # S1 需求文档，默认 worker:doc
+# design         = "worker:doc"    # S2 设计初稿，默认 worker:doc
+# design_review  = "worker:doc"    # S2 自评审（single 模式），默认与 design 同角色（自己改自己）；可换 leader 交叉评审
+# design_judge   = "leader"        # S2 arena 裁判，默认 leader
+# tdd            = "worker:code"   # S3 TDD 实施，默认 worker:code
+# techdoc        = "worker:doc"    # S5 单独补跑技术文档，默认 worker:doc
+
+[design]
+mode = "auto"                # auto（默认）= 全局 [[panel.arena]] 候选 ≥2 时走 arena，否则 single
+                             # single = 单模型写设计 + self_review_rounds 轮自评审修复
+                             # arena  = 多候选并行 + 裁判选一 + 移植合成
+self_review_rounds = 3       # single 模式自评审轮数，默认 3
+
+# ---------------------------------------------------------------- S4+S5 评审修复迭代（生成任务级配置调 review-fix-loop）
+[s4_loop]
+max_rounds      = 20         # 最多迭代轮数，默认 20
+no_progress_max = 2          # 连续几轮阻塞级不下降就停
+block_levels    = ["严重", "高"]
+timeout_minutes = 240        # 单次模型调用超时
+interrogate     = false      # 通过后追加多模型对抗评审（高风险需求建议开）
+run_techdoc     = true       # 评审通过后自动生成技术文档（S5）
+# reviewer / fixer 缺省用全局 config.toml 的 leader / worker.code；也可在本任务内联覆盖：
+# reviewer = { engine = "claude", model = "glm-5.3[1m]", settings = "~/.claude/settings.json.glm",
+#              env = { CLAUDE_CODE_EFFORT_LEVEL = "max" } }
+# fixer    = { engine = "claude", settings = "~/.claude/settings.json.deepseek" }
+
+# ---------------------------------------------------------------- 监控与看门狗
+[monitor]
+watchdog             = true   # 启动独立看门狗进程（心跳停滞/进程死亡/总时长超限 → 事故记录 + 报告）
+stage_timeout_minutes = 240   # 单次外部调用的超时（看门狗告警阈值自动放宽 30 分钟）
+total_timeout_hours   = 24    # 全流程总时长上限，超限看门狗终止流程并出报告
+report_interval_minutes = 30  # 建议的监控汇报节奏（监控 Agent 按此间隔向用户汇报）
+
+# ---------------------------------------------------------------- 提示词覆盖（可选）
+# [prompts]
+# requirement_extra = """……（追加到 S1 提示词末尾的补充要求）"""
+# tdd = "/path/to/my-tdd-prompt.md"        # 整体替换某阶段模板
+# design_review_text = """……（整体内联）"""

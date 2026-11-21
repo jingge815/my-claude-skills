@@ -1,0 +1,193 @@
+# 实际配置（已被 .gitignore 忽略，可以写真实密钥），字段说明见 config.example.toml
+# 运行：/usr/bin/python3.12 loop.py [-c config.toml] [--check]
+#
+# 本轮任务：真动态计算图（req_id=true-dyn-graph）已提交改动的评审-修复迭代。
+# 评审范围是两仓的提交区间（M1 窗口物化 → M2 exact_dispatch → M3 混批 →
+# M4a GeneSim → M4b 首片 + EP + 修复），不是未提交改动。
+# 评审与修复都走 Claude Code CLI + GLM 5.3，固定命令形态：
+#   claude --dangerously-skip-permissions --settings ~/.claude/settings.json.glm
+# 模型 glm-5.3[1m]，思考强度 max。loop.py 会把 settings 路径同时用于读取网关 env
+# 和命令行 --settings，避免独立 CLAUDE_CONFIG_DIR 下用不到 GLM 模型。
+# 上一任务（multi-ceva-cascade）配置备份在 config.multi-ceva-cascade.toml.bak。
+
+[project]
+req_id   = "true-dyn-graph"
+workdir  = "/data/fjg/pengcheng/flagOS"
+# base 是动态图工作线的起点：编译仓 f8b23d4（D0-D2 审计收口）之后全部 18 笔；
+# genesim 6d24d30（Qwen3 MoE 骨架支持）之后 2 笔。head 默认 HEAD。
+repos    = [
+  { path = "/data/fjg/pengcheng/flagOS/flagos-pim-compiler", base = "f8b23d4" },
+  { path = "/data/fjg/pengcheng/flagOS/genesim",             base = "6d24d30" },
+]
+docs_dir = "/data/fjg/pengcheng/flagOS/flagos-pim-compiler/docs"
+fingerprint_exclude = [
+  "test-results/", ".opcompiler_cache/", "gml_out/", ".pytest-tmp",
+  "*.swp", "*.log", "runs/", "weekly_*.md",
+]
+
+[loop]
+max_rounds      = 10
+no_progress_max = 2
+block_levels    = ["严重", "高"]
+timeout_minutes = 240
+run_techdoc     = false
+techdoc_role    = "fixer"
+
+[skills]
+dir = "~/.claude/skills"
+
+[proxy]
+commands  = []
+check_url = ""
+
+# 评审：Claude Code CLI + GLM 5.3（settings.json.glm），max 思考强度
+[reviewer]
+engine   = "claude"
+model    = "glm-5.3[1m]"
+settings = "~/.claude/settings.json.glm"
+env      = { CLAUDE_CODE_EFFORT_LEVEL = "max" }
+prompt   = "prompts/review.md"
+
+extra_prompt = """
+零、评审基准与任务
+唯一基准是用户批准的计划：/home/jgfeng/.claude/plans/woolly-spinning-otter.md
+（真动态计算图：运行期地址/数据感知 + 多 batch 调度；七条拍板决策与里程碑
+M1/M2/M3/M4a/M4b 在其中）。过程文档（实施记录，需与代码核对）：
+- {docs_dir}/moe-exact-dispatch-20261117.md（M2 主文档：exact_dispatch、共享化、48L 账本、转默认）
+- {docs_dir}/mixed-batch-wave-20261117.md（M3 混批）
+- {docs_dir}/m0-ceva-probe-20261118.md（M0 两结论）
+- {docs_dir}/moe-exact-genesim-20261118.md（M4a）
+- {docs_dir}/m4b-ceva-window-variants-20261118.md（M4b 首片）
+- {docs_dir}/moe-exact-ep-20261120.md（EP stretch）
+- {docs_dir}/moe-exact-pp-nograd-20261120.md（exact×PP no_grad 修复）
+
+对提交区间的代码进行评审。围绕下面的核心目标逐条回答「是否完成、还存在哪些
+问题」，对每个问题给出根因和能一次收敛同类问题的修改思路。
+
+核心目标（对照计划里程碑）：
+1. M1 窗口/地址运行期物化：materialize 消费 RegionRef、激活窗口池按 8 编译、
+   运行期宽度 4；静态路径逐字节不变。
+2. M2 MoE 精确行数分派 exact_dispatch（现已转默认）：dispatch v2 运行期算
+   k_e 写设备路由表、行级 gather/scatter_add、where 尾链退役、紧凑缓冲
+   全专家共享（4L 激活 5.4×→1.07×）、跳过事件挂流队尾防归约竞态；三模式
+   token 逐位一致。
+3. M3 混批调度：plan_wave FCFS 纯函数、外部组批直喂、容量查询三件套与
+   背压、KV 感知准入（池耗尽收窄 wave 不中途崩）。
+4. M4a GeneSim 接线：两仓枚举锁步、moe_exec_rows 字段、expert_work 按
+   Σk_e 行计费（k_e=均匀期望 Tq·top_k/E、权重项×命中并集）；真实仿真已
+   跑通 exact×纯 TP（tiny 与 4L）。
+5. M4b 首片 + EP：CEVA 窗口变体静态派生（实例目录+bundle 平移记录）与
+   exact 三层 fail-fast；exact 支持 EP 专家并行（专家级宿主集，ep=1 逐字节
+   不变）；exact×PP no_grad 生产图修复（前向闭包守卫）。
+
+一、仓库与代码范围
+{repos}
+- flagos-pim-compiler：runtime/（materialize、executor、exec_plan_gen、
+  scheduler、binding、shape_bind）、graph/（moe_exact、spec_prop）、
+  memory/mem_planner.py、backend/（hal_numpy、vllm_worker）、
+  genesim_bridge/、gml_bridge/ceva.py、scripts/、tests/ 是本轮主要改动。
+- genesim：src/ir/model_ir.py 与 src/scheduler/gene_sim_scheduler.py 是
+  本轮仅有的两处改动（枚举+缺省规则+moe_exec_rows+计费分支）；
+  其余历史代码不得算作本轮问题。
+- 评审对象是 base..HEAD 提交区间 + 工作区未提交改动（当前应为零）。
+
+二、重点检查
+1. 逐位一致性主张是否被测试真锁住：三模式对拍（dense/dynamic/exact ==
+   HF）、E=2 topk==E、norm_topk_prob 两语义、路由表位级快照（scatter 执行
+   时取，非终态）、no_grad 生产导出路径回归、EP 逐 token 对拍、48L/4L
+   探针口径。特别警惕「测试与生产走不同代码路径」（已知教训：grad 开关
+   使导出图分叉，2385 绿回归漏掉 exact×PP 崩溃）——找出还有哪些断言只覆盖
+   单测专属路径。
+2. 并发与地址叠址正确性：跳过事件挂 _stream_tail 的 FIFO 契约、紧凑缓冲
+   共享的 WAR 边（gather 惰性发射、编译期交错防护）、greedy_reuse 区间
+   判据、pending_readers_of_reused_addresses 与 _war_waits 的闭合
+   （war_waits 对未发射读者静默跳过的风险面）。凡涉及 memory/mem_planner.py
+   的问题，验证必须包含 verify-act-reuse 技能（skills 目录，改该文件必跑）。
+3. fail-fast 纪律：KV 收窄不兜底（单请求装不下照旧在 ensure 抛）、CEVA
+   exact 三层防线、materialize 越池即抛、tiled×exact 与 exact×EP 的
+   不支持组合是否为显式拒绝而非裸异常。
+4. GeneSim 计费语义：Σk_e==topk·Tq 恒等式、flops 的 Tq 项×k_e 与权重项×
+   命中并集的拆分、moe_exec_rows 只写不读的定位、两仓缺省规则锁步
+   （PIM_MOE_DISPATCH 缺省 "2"）。
+5. ep=1 逐字节不变与提交切分：各提交是否独立可回退、TP/PP 路径行为未被
+   EP/共享化/转默认改变（测试与探针证据是否充分）。
+6. 代码质量：段偏移算术统一后有无残留手写、防御性兜底、注释规范
+   （1-2 句中文）、死代码、文档与代码/git 不一致处。
+
+三、边界（不得列为缺陷，评审时跳过）
+- CEVA runner 侧多请求改造：用户明确搁置（M4b 下一片未开工）。
+- 真路由 trace 驱动 k_e：取向问题留用户拍板，均匀期望是登记的设计选择。
+- 48L EP 账本负结果（8 DPU 同规模 EP 不省权重）：已如实登记。
+- dynamic/dense×PP tiny token 与 HF 偏移：既有行为、已登记待查，不在
+  本轮改动责任内（但若发现与本轮改动相关须指出）。
+- 策略自动枚举不产 EP 组合（手工 ShardStrategy 为入口）：按计划不扩 scope。
+- 两仓未 push、CEVA token-check 4.5h 终验未排期：流程事项非代码缺陷。
+- dense_sim/dynamic_dispatch 两模式行为应保持不变，其历史行为不算问题。
+
+四、验证纪律（用户既有要求沿用：只做简单单元测试）
+- 白名单（可跑）：pytest 单文件或 -k 子集，重点
+  tests/test_moe_exact_dispatch.py、tests/test_moe_ep.py、
+  tests/test_moe_dispatch.py、tests/test_moe_rows_kernels.py、
+  tests/test_multi_request_decode.py、tests/test_runtime_materialize.py、
+  tests/test_runtime_scheduler.py、tests/test_shape_binding.py、
+  tests/test_ceva_windows.py、tests/test_ceva_export.py、
+  tests/test_placement_export.py、tests/test_genesim_bridge.py；
+  genesim 用 ./run.sh --test model_ir|compiler_placement|moe_execution_cost。
+  每条命令预计超过 1 小时就不执行。
+- 禁止：全量回归（共享机器负载下 2h+）、任何 CEVA/GC/仿真长跑、48L/4L
+  编译探针（小时级）、启动新的 pytest 全量。
+- 已有证据可引用（标注「复用已有验证」）：文档中记录的三臂探针、账本、
+  仿真运行数字；/tmp/ 下的探针脚本与产物若仍存在可读取但不重跑。
+- 每个结论标注「本次实际验证 / 复用已有验证 / 仅核对实现未执行」。
+
+五、报告要求
+- 问题按根因归类；修改思路覆盖同一根因的所有入口。
+- 单独给出五个核心目标的完成度表（已完成/部分完成/未完成，附证据与缺口）
+  与总体结论。
+"""
+
+# 修复：Claude Code CLI + GLM 5.3（settings.json.glm），max 思考强度
+[fixer]
+engine   = "claude"
+model    = "glm-5.3[1m]"
+settings = "~/.claude/settings.json.glm"
+env      = { CLAUDE_CODE_EFFORT_LEVEL = "max" }
+prompt   = "prompts/fixer.md"
+
+extra_prompt = """
+零、任务
+根据用户批准的计划（/home/jgfeng/.claude/plans/woolly-spinning-otter.md）与
+过程文档（{docs_dir}/moe-exact-dispatch-20261117.md 等，见评审报告引用）修复
+本轮评审问题。先确认问题真实存在（读代码、跑最小复现，不能只信评审结论）；
+确认成立的全部修复，包括中、低级别；评审报告「核心目标完成度」中未完成或
+部分完成的条目也必须一并覆盖。
+
+一、仓库与修复纪律
+{repos}
+- 每个仓库先读自己的 CLAUDE.md 并遵守：最小实现、先搜索再写、删优于加、
+  不写防御性兜底、注释简短中文、测试与代码同次完成、结束报告净增删行数。
+- flagos-pim-compiler：每个 shell 先 source
+  /data/fjg/pengcheng/flagOS/flagOS-installed/pytorch/env-pytorch.sh。
+  **凡改动 memory/mem_planner.py（greedy_reuse/pending_readers/
+  TransientTensor/_moe_exact_tensors/plan_dpu 激活区接线），必须先跑
+  verify-act-reuse 技能并三档全过。**
+- genesim：测试用 ./run.sh --test <名>（不是 pytest）。
+- 修复改动保持未提交，不要 git commit，不要改写已有提交；评审范围内的
+  已提交改动保持原样。
+- 遇到需要用户裁决的事项（真路由 k_e、EP 自动枚举、CEVA runner 侧等边界），
+  写进待确认事项并跳过，不要自行决定。
+
+二、验证（沿用：只做简单单元测试）
+- 白名单：编译仓 pytest 单文件/-k 子集（评审报告同款清单）；genesim
+  ./run.sh --test model_ir|compiler_placement|moe_execution_cost。
+- 禁止全量回归（负载下 2h+）、任何小时级命令、CEVA/GC/仿真长跑、
+  48L/4L 编译探针。
+- 证据标注「本次实际验证 / 复用已有验证 / 仅代码推理」；未执行不得写成通过。
+"""
+
+[techdoc]
+prompt = "prompts/techdoc.md"
+
+# 提示词占位符：{round} 轮次号  {req_id}  {workdir}  {repos} 仓库列表  {docs_dir}
+#              {implement_file} 实施文档  {review_file} 本轮评审文件
+# 评审文件固定命名为 <docs_dir>/review-<req_id>-<YYYYMMDD>-roundNN.md，NN 接着已有最大轮次递增，不覆盖历史

@@ -5,23 +5,27 @@
 ## 开发流水线总图
 
 ```text
-用户原始 prompt（一个输入）
+用户原始 prompt + 任务配置 tasks/<需求标识>.toml（一个输入）
     │
     ▼
-dev-flow 主控（路由+门禁+状态+决策日志+worktree，不亲自干活）
+dev-flow/flow.py 一键确定性执行器（门禁+心跳+状态+决策日志+worktree，每阶段独立进程）
     │
-    ├─ S0 锐化        pstack/sharpen
-    ├─ S1 需求        requirement-doc（复杂需求先 pstack/arena 多候选）
-    ├─ S2 设计        tech-design-doc（强制双方案 + 任务拆分 DAG；贵决策按需 pstack/arena）
-    ├─ S3 实施        tdd-implement（任务级 worktree；DAG 独立单元可并行）
-    ├─ S4 质量闭环    review-fix-loop = code-review-doc（合规闸）↔ tdd-implement 阶段五
-    │                 高风险追加 pstack/interrogate（对抗闸，finding 必须运行证据）
-    ├─ S5 交付        techdoc
+    ├─ W0 worktree   每仓一个任务 worktree（use_worktree=false 可直连原仓）
+    ├─ S0 锐化        pstack/sharpen（内联提示词）
+    ├─ S1 需求        requirement-doc
+    ├─ S2 设计        tech-design-doc：single=单模型+3 轮自评审修复（默认）；
+    │                 arena=多候选并行+裁判选一+移植合成（全局 panel.arena ≥2 自动启用）
+    ├─ S3 实施        tdd-implement（核心目标/仓库/验证命令注入提示词；DAG 单元可并行）
+    ├─ S4 质量闭环    生成任务级配置调 review-fix-loop = code-review-doc（合规闸）↔ tdd-implement
+    │                 阶段五，默认 20 轮直到阻塞级清零；高风险追加 pstack/interrogate（对抗闸）
+    ├─ S5 交付        techdoc（评审通过后 loop run_techdoc 自动生成；--stage S5 可单独补跑）
     │
     └─ P 性能支路     perf-optimize（单点）/ hill-climb（持续）→ 回 S4 双闸
 
-全程：任务 worktree（一任务一组，子任务不建）+ flow-state 状态文件 + decisions.tsv 决策日志
-外部模型：dev-flow/agents.py（角色配置 dev-flow/config.toml：leader 主决策 + worker 干活 + panel 多候选）
+全程：任务 worktree + flow-state 快照 + progress 工作进展日志（每步+证据）
+      + decisions.tsv 决策日志 + 心跳/看门狗（watchdog.py：停滞/死亡/超限 → 事故报告+改进建议）
+外部模型：flow.py / agents.py 复用 loop.py 引擎层（角色配置 dev-flow/config.toml：
+      leader 主决策 + worker 干活 + panel 多候选；任务参数在 tasks/*.toml，多任务真并行）
 ```
 
 ## 技能总表
@@ -59,7 +63,7 @@ dev-flow 主控（路由+门禁+状态+决策日志+worktree，不亲自干活�
 
 | 技能 | 职责 | 典型触发 |
 |------|------|----------|
-| dev-flow | 一键全流程主控：锐化→需求→设计→实施→评审迭代→交付；任务级 worktree、门禁 G0-G5、flow-state、decisions.tsv、看门狗、--auto/--resume | "全流程开发""一键从需求到交付" |
+| dev-flow | 一键全流程：任务配置 + flow.py 确定性执行器串联锐化→需求→设计（single 3 轮自评审 / arena 多候选）→TDD→评审迭代（默认 20 轮）→技术文档；任务级 worktree、progress 进展日志、decisions.tsv、心跳+看门狗、--resume/--stage | "全流程开发""一键从需求到交付""dev-flow" |
 | perf-optimize | 单点性能问题：复现优先 + trace 定位 + 性能咒语（最便宜优先）+ 七问核验 | "修一下这个性能问题" |
 | hill-climb | 持续指标优化：冻结 harness 证灵敏度 + 一次一改一测 + 保留或回退 + decision.tsv + 停止谓词 | "围绕这个指标持续优化" |
 
@@ -70,13 +74,26 @@ dev-flow 主控（路由+门禁+状态+决策日志+worktree，不亲自干活�
 | paper-reader | 学术论文 PDF→中文总结（md+docx，九章结构） |
 | pdf2ppt | 学术论文 PDF→总结汇报 PPT + 逐页旁白 |
 | proposalword2ppt | 项目申请书→答辩 PPT + 旁白稿 |
-| grant-writing | 科研基金申请书全流程撰写 |
+| grant-writing | 科研基金申请书全流程撰写（文献门槛：入库 >80 篇 CCF A/B/C 或软件学报/计算机学报/自动化学报/中国科学级别、优先近 5 年、逐篇关键点总结；三案竞标：多模型各出一案或单模型 3 并行子代理，高级模型五条标准选优定基准；成稿后九条验证点迭代评审修复，≤20 轮） |
 | AICompilerDailyTracker | AI 编译器领域每日论文跟踪日报 |
 | claude-skills-research | Claude Skills/Agent 技术主题学术调研报告 |
 | book-to-skill | 书籍/文档→结构化 agent 技能 |
 | format-replica-skill-gen | 从文档抽取排版范式生成格式复刻子技能 |
 
 ## 基础设施
+
+### dev-flow/flow.py —— 一键全流程执行器
+
+读任务配置驱动全流程（S4 生成任务级配置调 review-fix-loop，不动其全局 config.toml）：
+
+```bash
+python3 dev-flow/flow.py -c tasks/xxx.toml --check   # 校验配置/仓库/角色（不调模型）
+python3 dev-flow/flow.py -c tasks/xxx.toml           # 一键全流程（后台运行）
+python3 dev-flow/flow.py -c tasks/xxx.toml --resume  # 断点续跑；--stage S5 可单独补跑
+python3 dev-flow/flow.py status <需求标识> --watch   # 实时状态（监控 Agent 用）
+```
+
+配套：`watchdog.py`（心跳停滞/进程死亡/总时长超限 → 事故记录 + watchdog-report 含流程改进建议）、`prompts/`（各阶段提示词模板，任务配置可覆盖）、`tasks/example.toml`（任务配置样例，真实路径只写在 tasks/ 下被 gitignore 的任务文件里）。
 
 ### dev-flow/agents.py —— 外部模型调度器
 
@@ -107,6 +124,6 @@ python3 dev-flow/agents.py check leader arena:deepseek   # 连通测试
 
 ## 快速上手
 
-- **一键全流程**：直接说"dev-flow：<你的原始需求描述>"（或"全流程开发…"），主控自动建 worktree、串全流程、每阶段过门禁；`--auto` 全自动、`--resume <标识>` 断点续跑。
+- **一键全流程**：说"dev-flow：<你的原始需求描述>"，主对话生成 `tasks/<需求标识>.toml`（T3 内容确认一次）→ `flow.py --check` 校验 → 后台跑 `flow.py` → `flow.py status <标识> --watch` 监控汇报；断点续跑 `--resume`，补跑某阶段 `--stage S3`。
 - **单阶段**：按各技能触发语点名技能。
 - **评审-修复迭代**：配置 `review-fix-loop/config.toml` 后 `python3 loop.py --check` 验证、`python3 loop.py` 运行；对抗评审开关 `[loop].interrogate = true`（攻击者来自 dev-flow/config.toml）。

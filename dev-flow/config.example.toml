@@ -1,4 +1,7 @@
-# devflow 角色配置模板。复制为 config.toml 后按需修改；config.toml 已被 .gitignore 忽略，不入 git。
+# devflow 全局角色配置模板（厂商账号层，所有任务共享）。复制为 config.toml 后按需修改；
+# config.toml 已被 .gitignore 忽略，不入 git。任务级参数（仓库、核心目标、轮数等）不要写在这里，
+# 写进 tasks/<需求标识>.toml（样例见 tasks/example.toml）。
+#
 # 引擎统一为 claude CLI，用 --settings 指向不同厂商的配置文件切换账号；
 # kimi / codex 引擎沿用 review-fix-loop 的账号登录方式，需要时把 engine 改为对应值。
 # 密钥不写在这里：claude 引擎的密钥在各 settings 文件的 env 中，kimi/codex 用账号登录态。
@@ -10,25 +13,26 @@
 #   args      = 可选，追加命令行参数
 #   env       = 可选，追加环境变量
 #   proxy     = 是否需要代理（codex 通常需要 true；代理命令配在 review-fix-loop/config.toml [proxy]）
-#   in_session = 可选，仅 [[panel.*]] 条目支持：true 时该候选在当前会话内用 Agent 子代理跑，不启动外部 CLI
+#   in_session = 可选，仅 [[panel.*]] 条目支持：true 时该候选在当前会话内用 Agent 子代理跑。
+#                注意：flow.py 一键流程中 panel 条目一律按外部进程执行，该标记被忽略。
 
-# ---- 主决策：分配任务、比较需求/设计候选、裁决、评审把关 ----
+# ---- 主决策：S0 锐化、S2 arena 裁判、S4 评审/修复的默认角色 ----
 [leader]
 engine   = "claude"
 settings = "~/.claude/settings.json.glm"
 
-# ---- 弱干活：写需求文档、设计文档 ----
+# ---- 弱干活：S1 需求文档、S2 设计、S5 技术文档 ----
 [worker.doc]
 engine   = "claude"
 settings = "~/.claude/settings.json.glm"
 
-# ---- 弱干活：实际编码（TDD 实施） ----
+# ---- 弱干活：S3 TDD 实施；S4 修复的默认角色 ----
 [worker.code]
 engine   = "claude"
 settings = "~/.claude/settings.json.glm"
 
-# ---- 多候选面板：列表配置，几个条目就并行几路（arena 需求/设计多候选、interrogate 对抗评审）----
-# 每个条目一个候选/攻击者；调用量：python3 dev-flow/agents.py run arena:<name> ...
+# ---- 多候选面板：[[panel.arena]] 条目数 ≥2 时，flow.py 的设计阶段自动走 arena 模式
+#      （多候选并行 + leader 裁判选一 + 移植合成）；否则走 single 模式（+3 轮自评审修复）。
 [[panel.arena]]
 name     = "glm"
 engine   = "claude"
@@ -44,6 +48,7 @@ settings = "~/.claude/settings.json.deepseek"
 # name     = "kimi"
 # engine   = "kimi"
 
+# ---- 对抗评审攻击者（任务配置 [s4_loop].interrogate = true 时使用）----
 [[panel.interrogate]]
 name     = "glm"
 engine   = "claude"

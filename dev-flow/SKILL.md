@@ -1,72 +1,68 @@
 ---
 name: dev-flow
-description: 一键全流程主控。输入一段原始 prompt，自动串联完成：prompt 锐化（pstack/sharpen）→ 需求文档（requirement-doc，复杂需求先 pstack/arena 多候选）→ 技术设计（tech-design-doc，强制双方案对比与任务依赖 DAG）→ TDD 实施（tdd-implement，任务级 worktree、独立单元可并行）→ 评审修复迭代（review-fix-loop / code-review-doc，高风险追加 pstack/interrogate 对抗评审）→ 技术文档（techdoc）。触发词："全流程开发""一键从需求到交付""dev-flow""从头到尾把这个需求做完"。本技能只做阶段路由、门禁判定、状态记录、决策日志与 worktree 管理，不亲自写文档、不亲自写代码。单阶段任务直接用对应技能，不必走本技能。
+description: 一键全流程主控。输入一段原始 prompt 与一份任务配置（tasks/<需求标识>.toml，样例见 tasks/example.toml），由 flow.py 确定性执行器在独立进程中自动串联：prompt 锐化 → 需求文档（requirement-doc）→ 技术设计（tech-design-doc；单模型默认 3 轮自评审修复，全局配置 ≥2 个多候选模型时自动切换 arena 多候选+裁判选一）→ TDD 编码（tdd-implement）→ 评审修复迭代（生成任务级配置调 review-fix-loop，默认 20 轮直到阻塞级清零）→ 技术文档（techdoc）。全程任务级 worktree、progress 工作进展日志、decisions.tsv 决策日志、心跳+看门狗监控、断点续跑；一个任务一份配置，多任务真正并行。触发词："全流程开发""一键从需求到交付""dev-flow""从头到尾把这个需求做完"。本技能主对话只做任务配置生成与确认、后台启动、状态监控与结果汇报，不亲自写文档、不亲自写代码。单阶段任务直接用对应技能，不必走本技能。
 ---
 
 # dev-flow 全流程主控
 
-把"一段原始需求描述"驱动成"可交付的代码与技术文档"，方式是把仓库里的单阶段技能按固定流水线串起来，并在每个阶段边界设门禁。主控自己的产出只有三样：任务 worktree、状态文件、决策日志——其余一切由对应技能产出。
+把“一段原始需求描述”驱动成“可交付的代码与技术文档”。重活由 `flow.py` 确定性执行器完成：每个阶段都是独立进程中的全新对话，复用 `review-fix-loop/loop.py` 的引擎层与 `dev-flow/config.toml` 的全局角色；主对话只做配置、启动、监控、汇报。
 
-## 模式
+## 一键式用法（主路径）
 
-- **交互模式**（默认）：T2 级决策（见自主性分级）停下问用户。
-- **--auto 全自动**：仅 T3 必停；可逆决策一律先做后报，门禁点集中汇报。
-- **--resume <需求标识>**：读取既有 flow-state 文件，从断点阶段继续。
-- 性能任务：主线走完（G4 通过）后，用户点名或需求文档含性能指标时，进入性能支路（perf-optimize 单点 / hill-climb 持续），结果回到质量闭环。
+1. **生成任务配置**：从 `tasks/example.toml` 复制为 `tasks/<需求标识>.toml`，填入原始 prompt、仓库清单、核心目标（逐字）、验证命令、边界。真实路径只写在这个文件里（已被 .gitignore 忽略）。用户直接给出原始 prompt 时，主对话代为生成配置，其中 T3 级内容（核心目标、仓库、验收标准）向用户确认一次。
+2. **校验启动**：`python3 dev-flow/flow.py -c <任务配置> --check`（不调模型）→ 通过后同一命令去掉 `--check` 后台运行。`--ping` 可先做角色连通测试。
+3. **监控**：`python3 dev-flow/flow.py status <需求标识> --watch` 后台运行（或 Monitor/定时唤醒），按 `report_interval_minutes` 节奏向用户汇报当前阶段、各阶段状态、心跳与最新进展；发现 NEED_HUMAN、阶段失败或看门狗事故立即提醒。
+4. **收尾**：全流程完成后汇报产物清单（request/design/implement/review-*/techdoc、progress、decisions.tsv、watchdog-report）与合并策略（worktree 合回主分支 / 保留待检查）；安全暂停时告知恢复命令 `--resume`。
 
-## 阶段路由表
+其他入口：`--resume` 断点续跑（沿用 docs 产物与阶段完成状态）；`--stage S3` 只跑指定阶段（如单独补跑 `--stage S5` 技术文档）；`--no-watchdog` 不起看门狗。单阶段交互任务直接用对应技能，不进 flow.py。
 
-| 阶段 | 调用 | 产出 | 门禁 |
-|------|------|------|------|
-| W0 worktree | 为主任务涉及的每个仓库建任务 worktree（见 worktree 规范） | `worktrees/<需求标识>/<仓库名>/` | worktree 就绪、基线 commit 记录 |
-| S0 锐化 | Read `~/.claude/skills/pstack/sharpen/SKILL.md` 并遵循 | 锐化后的任务说明 | G0：锐化稿就绪（交互模式请用户确认一次；--auto 直接过） |
-| S1 需求 | `requirement-doc`（复杂需求先 Read `pstack/arena/SKILL.md` 多候选：`python3 dev-flow/agents.py run arena:<name>` 并行候选、`run leader` 裁判） | `docs/request-<标识>-<日期>.md` | G1：文档存在、无阻塞级待确认、验收命令引用项目验证命令清单 |
-| S2 设计 | `tech-design-doc`（含 architect 双方案；贵决策按需 arena） | `docs/design-<标识>-<日期>.md` | G2：含 ≥2 套候选形态对比、任务 DAG 无环、共享文件已标注串行、无阻塞级待确认 |
-| S3 实施 | `tdd-implement`（并行单元 fan-out 子代理） | 代码改动 + `docs/implement-<标识>-<日期>.md` | G3：L0/L1 全绿、任务单元 100% 覆盖、实施文档已更新 |
-| S4 质量闭环 | `review-fix-loop`（loop.py；或手工 `code-review-doc`↔`tdd-implement` 阶段五）；高风险追加 interrogate | `docs/review-<标识>-*.md`（及 interrogate 报告） | G4：阻塞级清零、（若开）interrogate 无确认项、全量回归通过 |
-| S5 交付 | `techdoc` | 最终技术文档 | G5：文档产出、决策日志完整 |
-| P 性能支路 | `perf-optimize` / `hill-climb` | 优化 commit + decision.tsv | 回到 S4 双闸评审 |
+## 阶段与门禁
 
-门禁失败的处理：回到上一阶段对应技能修复后重过门禁；连续 2 次同门禁失败或 loop.py 报 NEED_HUMAN 即安全暂停（见看门狗），不硬闯。
+| 阶段 | 执行 | 产出与门禁 |
+|------|------|-----------|
+| W0 worktree | flow.py 为每个仓建/复用 `worktrees/<需求标识>/<仓库名>/`（分支 `dev-flow/<需求标识>`）；`use_worktree=false` 时直连原仓 | worktree 就绪、基线记入 flow-state 与 decisions.tsv |
+| S0 锐化 | sharpen 角色（pstack/sharpen 四问，内联在提示词） | 锐化稿存 run 目录；原始 prompt 永远原文保留 |
+| S1 需求 | requirement 角色调 requirement-doc 技能 | G1：`request-<标识>-<日期>.md` 存在、含“核心目标”与“验收” |
+| S2 设计 | 见下节两种模式 | G2：`design-<标识>-<日期>.md` 存在、含任务拆分；single 模式另要求每轮自评审记录 |
+| S3 TDD 实施 | tdd 角色调 tdd-implement 技能（核心目标、仓库、验证命令、偏差分级全部写进提示词） | G3：实施文档存在、回复 FLOW_STATUS: OK |
+| S4+S5 评审修复+交付 | flow.py 生成任务级 loop 配置（写入 run 目录，不动全局 config.toml），调 `loop.py -c`；核心目标、需求/设计文档绝对路径、验证纪律、边界自动注入 reviewer/fixer/techdoc 的 extra_prompt | G4：阻塞级（默认严重、高）清零、退出码 0；通过后 run_techdoc 自动生成技术文档 |
 
-调用技能的方式：仓库根技能用 Skill 工具或 Read 其 SKILL.md 并遵循；`pstack/` 子文件夹技能一律 `Read ~/.claude/skills/pstack/<名>/SKILL.md` 并遵循；外部模型角色一律经 `python3 ~/.claude/skills/dev-flow/agents.py run <角色>`（角色见 `dev-flow/config.toml`）。
+门禁失败或角色报告 `FLOW_STATUS: NEED_HUMAN`：安全暂停（状态落盘、进展日志记录恢复方式），不硬闯；用户处理后 `--resume` 继续。
 
-## 状态文件与决策日志
+## S2 设计阶段（两模式，重点保障设计质量）
 
-- **状态文件** `<docs_dir>/flow-state-<需求标识>-<日期>.md`，每阶段边界更新：当前阶段、各门禁状态（待/过/败+次数）、并行 worker 清单、worktree 路径、阻塞原因。人随时可读，一眼看清流水线在哪。
-- **决策日志** `<docs_dir>/decisions.tsv`（`pstack/show-me-your-work` 格式：`ts/phase/decision/why/evidence/result`，append-only）：门禁通过/失败、T1/T2 偏差决策、arena 选型与落选理由、并行分配、回退、性能实验每轮结果（hill-climb 与 loop.py 自动写入，主控补记其余决策点）。techdoc 与实施文档的偏差说明直接引用此文件，不重复叙述。
+- **模式判定**：任务配置 `[design].mode`（默认 auto）——auto 时全局 `config.toml` 的 `[[panel.arena]]` 条目 ≥2 走 arena，否则 single。
+- **single（单模型）**：worker 写设计初稿 → **N 轮自评审修复**（默认 3，全新进程每轮）：重新仔细查看代码与调用链 → 围绕需求文档核心目标与相关文档逐条评审（代码契合、目标覆盖、DAG 可执行、验证可跑）→ **就地修改设计文档** → 在“### 自评审记录”追加该轮记录。程序核验每轮记录后才放行。
+- **arena（多候选）**：各 `panel.arena` 候选并行独立写方案（同一需求契约）→ leader 裁判按 5 项标准评分选 base 并给移植清单 → 移植合成最终设计文档（“### 选型记录”注明 base/移植/拒绝）。候选掉队不拖垮整场，≥1 份即继续。
+- `design_review` 角色默认与 design 同角色（自己改自己），可配置为 leader 交叉评审。
 
-## worktree 规范（任务级）
+## 配置与状态文件
 
-1. **管理单位 = 任务**（一个需求标识的完整流程）。启动时为本任务涉及的每个仓库各建一个 worktree：`<统一父目录>/worktrees/<需求标识>/<仓库名>/`；单仓库任务同样适用。
-2. **子任务一律不建 worktree**。全流程（调研、实施、评审修复、loop.py 运行）都在任务 worktree 中；并行子代理直接在其中工作，写冲突唯一防线 = S2 产出的任务 DAG（文件不相交才并行、共享必串行）。
-3. **多任务并行**：新对话、新需求标识 = 新的一组任务 worktree，互不干扰。
-4. **收尾**：G5 通过或安全暂停后，向用户提示合并策略（合并回主分支 / 保留 worktree 待检查）；清理时只删自己建的 worktree，删前必查未提交改动。
-5. flow-state.md 维护任务→各仓库 worktree 路径表，`--resume` 与清理以此为准。
+- **任务配置 `tasks/<需求标识>.toml`**：任务级参数唯一来源（原始 prompt、仓库、核心目标、验证命令、边界、轮数、超时、角色指派）。多任务并行 = 各一份配置 + 各一组 worktree + 各一个 run 目录，互不干扰；全局角色配置共享只读。
+- **全局配置 `config.toml`**：只放厂商账号层角色（leader / worker.doc / worker.code / panel.arena / panel.interrogate）。
+- **flow-state** `docs/flow-state-<标识>-<日期>.md`：当前快照（阶段表、仓库基线、恢复命令），每阶段边界更新。
+- **progress 工作进展日志** `docs/progress-<标识>-<日期>.md`：append-only，每步一条（时间/阶段/步骤/进展/证据指针）；外部调用、门禁、每轮自评审、每轮评审结果、看门狗事故都落在这里。人随时可读，一眼看清执行到哪、证据在哪。
+- **decisions.tsv**：决策轨迹（show-me-your-work 格式：ts/phase/decision/why/evidence/result），与 progress 分工——决策与理由记这里，步骤进展记 progress。
+- **run 目录** `~/.cache/devflow/runs/<标识>/<时间>/`：心跳 heartbeat.json、stages.json、各阶段调用日志、生成的 loop-config.toml、看门狗报告。
 
-## 自主性分级（何时打扰用户）
+## 监控与看门狗
 
-| 级别 | 定义 | 交互模式 | --auto |
-|------|------|----------|--------|
-| T1 | 可逆实现细节偏差（命名、等价写法、测试组织） | 直接做+记录 | 直接做+记录 |
-| T2 | 设计意图/接口/范围偏差 | 停下问 | 选最近似的可逆方案执行、显著标记、门禁点集中追认 |
-| T3 | 不可逆动作（force-push、删数据、部署）、产品偏好、验收标准变更、真死路 | 必停 | 必停 |
+- flow.py 每次外部调用与阶段流转都更新心跳；`status --watch` 供监控 Agent 或用户随时查看。
+- **看门狗 `watchdog.py`**（独立进程，flow.py 启动时拉起）：心跳停滞（阈值=单次调用超时+30min，只告警不杀）、进程异常退出、总时长超限（终止进程树）→ 事故记入 `watchdog-incidents.tsv` 并同步 progress；结束时产出 `watchdog-report-<标识>.md`（事故时间线 + 面向流程系统的改进建议）并补一行 decisions.tsv。
+- 主对话对产出负责：收尾时抽查关键产物（diff、验证结果、评审结论）与 progress/decisions 是否互相印证，不照单全收。
 
-主运行中发现的可逆问题（坏技能、flaky 测试、工具故障）自行修复并单独记一行 decisions.tsv，不中断主目标；AI 自提的新需求写入待确认清单、门禁点集中请示，不自行开新的 dev-flow 流程。
+## 自主性分级（写进各阶段提示词，无人值守时）
 
-## 并行规则
+| 级别 | 定义 | 处理 |
+|------|------|------|
+| T1 | 可逆实现细节（命名、等价写法、测试组织） | 直接做+记录 |
+| T2 | 设计意图/接口/范围偏差 | 选最接近核心目标的可逆方案、显著标记、写入待确认事项 |
+| T3 | 不可逆动作、产品偏好、验收标准变更 | 绝不执行，回报 NEED_HUMAN 安全暂停 |
 
-- S3 并行：按 S2 的任务 DAG，文件不相交的单元一条消息内 fan-out 多个 Agent 子代理（各自完整执行 tdd-implement 的 TDD 五步）；共享文件单元串行；主对话负责分配、汇总、每个合并点跑 L1 回归。
-- S1/S2 多候选：`agents.py run arena:<name>` 后台并行（`[[panel.arena]]` 几条就几路），裁判用 `run leader`。
-- S4 对抗评审：`review-fix-loop` 的 interrogate 阶段（`[loop].interrogate = true`）自动并行攻击者。
-- 外部进程（agents.py 任务、L2 回归）启动后记录进 flow-state，完成即回收结论；不轮询，长任务用 `/loop` 或定时唤醒做心跳。
+## worktree 纪律
 
-## 看门狗与安全暂停
+管理单位=任务：一个需求标识一组 worktree（每仓一个），子任务一律不建；S3 的并行单元 fan-out 由 tdd-implement 在任务 worktree 内按设计 DAG 自行调度，写冲突靠 DAG 共享文件检测。收尾只清理自己建的 worktree，删前必查未提交改动。
 
-- 停止谓词（任一触发即安全暂停）：同一门禁连续 2 次失败；loop.py 返回 NEED_HUMAN；外部角色调用失败或超时；T3 决策；用户中断。
-- 安全暂停的动作：把当前状态与决策日志写完整（含"下次从这里继续"的具体位置），退出并告知用户恢复命令 `dev-flow --resume <需求标识>`。不带脏状态硬跑。
-- 主控对每个子代理/外部角色的产出负责：审 diff、验证据（claims 必须有命令与输出支撑），不照单全收。
+## 原则内联索引（pstack 纪律，不再单独复制）
 
-## 原则内联索引（本技能用到的纪律，出处为 pstack 原则，不再单独复制）
-
-证明它有效（对真实产物验证，不接受"能编译"）；把工作切成本身可验证的单元（每单元以一次检查收尾）；先消除共享再串行（并行的前提是文件不相交）；守护上下文窗口（大输出路由给子代理，主对话只留结论）；可逆就不问人（见自主性分级）；造杠杆（可复跑的脚本优于一次性手工操作）；解释数字（性能数字一律经 benchmark-checklist 七问）。
+证明它有效（对真实产物验证）；把工作切成本身可验证的单元；先消除共享再串行；守护上下文窗口（重活路由给外部进程，主对话只留结论）；可逆就不问人；造杠杆（任务配置 + flow.py 可复跑）；show-me-your-work（decisions.tsv 与 progress 双日志，证据是指针）；解释数字（benchmark-checklist 七问，性能支路 perf-optimize / hill-climb 单独触发后回 S4）。
