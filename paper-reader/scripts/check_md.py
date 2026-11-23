@@ -1,16 +1,21 @@
-"""论文总结 md 的机械校验：结构、图表编号、格式、中英混排、术语首现解释、数字溯源。
+"""论文总结 md 的机械校验：结构、图表编号、格式、中英混排、术语首现解释、数字溯源、参考文献。
 
 用法: .venv/bin/python scripts/check_md.py <summary.md> [--extract <extract目录>]
 
 错误(E)必须修复后才能生成 docx；警告(W)需逐条人工确认（确认无误可忽略）。
-结构：九章齐全有序（含「六.示例说明」）；概述恰 1 段、段末注明论文外网链接
-（确无公开链接时写明「未找到公开链接」）并有「如图」引导封面图；全文图1 为
-论文首页封面且位于「一.论文概述」段后、「二.研究背景」前；示例说明章有正文段落。
+结构：九章+参考文献+附录齐全有序（含「六.示例说明」）；参考文献位于「八.总结」
+之后、「附录」之前；概述恰 1 段、段末注明论文外网链接（确无公开链接时写明
+「未找到公开链接」）并有「如图」引导封面图；全文图1 为论文首页封面且位于
+「一.论文概述」段后、「二.研究背景」前；示例说明章有正文段落且配流程图与
+数据排布图两张图。
 术语首现解释：英文术语/缩写第一次出现时，同句应有中文解释（括号释义或"是/指/即/称"），
 保证只读本文即可理解全文；查不到解释的列出，需补定义或确认确属无需解释的常识词。
 数字溯源：正文里出现的数字（十位以上或带小数点）逐个到论文全文 text.md 里找，
 找不到的列出——要么是换算/推导值（应在文中写明换算关系），要么是写错或编造；
 「六.示例说明」内自构示例的数值豁免溯源（须在文中标注「示例取值」）。
+参考文献：正文引用编号 [N]（含 [N,M]、[N-M] 区间）与参考文献节条目一一对应，
+缺条目为错误、未被引用的条目为警告；条目与论文全文 text.md 做词汇级比对，
+匹配度过低的警告（疑似未逐字照录原文 References）。
 """
 from __future__ import annotations
 
@@ -85,6 +90,8 @@ def check(md_path: Path, extract: Path | None):
         err(f"章节顺序错误：{seq}")
     if not any(h.startswith("附录") for h in h2s):
         err("缺少「附录」")
+    if not any(h.startswith("参考文献") for h in h2s):
+        err("缺少「参考文献」（总结之后、附录之前，逐条附原文 References 条目）")
 
     # ---------- 2. 概述/总结的段落数 ----------
     def norm_sec(title):
@@ -211,7 +218,7 @@ def check(md_path: Path, extract: Path | None):
     # ---------- 6. 段落格式 ----------
     for i, l in enumerate(lines):
         s = l.rstrip("\n")
-        if not s.strip() or H1_RE.match(s) or H2_RE.match(s) or s.strip().startswith(("!", "|", ">", "#", "图", "表", "<")):
+        if not s.strip() or H1_RE.match(s) or H2_RE.match(s) or s.strip().startswith(("!", "|", ">", "#", "图", "表", "<", "[")):
             continue
         if LIST_RE.match(s.strip()):
             continue
@@ -225,7 +232,7 @@ def check(md_path: Path, extract: Path | None):
     # ---------- 7. 中英混排 ----------
     for i, l in enumerate(lines):
         s = URL_RE.sub("", plain(l.strip()))
-        if not s or s.startswith(("!", "|", ">", "#", "图", "表")) or LIST_RE.match(s):
+        if not s or s.startswith(("!", "|", ">", "#", "图", "表", "[")) or LIST_RE.match(s):
             continue
         if EN_MIX_RE.search(s):
             warn(f"第{i+1}行: 疑似整句英文混入中文段落（专有名词引用除外）: {s[:40]}")
@@ -255,11 +262,84 @@ def check(md_path: Path, extract: Path | None):
                    and not LIST_RE.match(l.strip()))
     if ex_paras == 0:
         err("「六.示例说明」缺少正文段落")
-    if not any(IMG_RE.match(l.strip()) for l in ex_lines):
-        warn("「六.示例说明」应配一张贯穿示例的流程图（draw_flow.py 自绘，或摘自原文示例图）")
+    # 示例说明须配两张图：流程图 + 数据排布图（数据在软硬件各层存储中的存放形态）
+    ex_img_idx = [i for i, l in enumerate(ex_lines) if IMG_RE.match(l.strip())]
+    if len(ex_img_idx) < 2:
+        err(f"「六.示例说明」应配两张图——贯穿示例的流程图 + 数据排布图（数据在软硬件流程"
+            f"各层存储中的存放位置与形态），当前 {len(ex_img_idx)} 张")
+    else:
+        layout_hit = False
+        for i in ex_img_idx:
+            j = i + 1
+            while j < len(ex_lines) and not ex_lines[j].strip():
+                j += 1
+            cap = plain(ex_lines[j]) if j < len(ex_lines) else ""
+            if re.search(r"(数据排布|数据布局|存放|存储布局|排布)", cap):
+                layout_hit = True
+        if not layout_hit:
+            warn("「六.示例说明」配图中未见「数据排布/布局/存放」类图题，请确认数据排布图已配"
+                 "（泳道=存储层级、节点=数据块形状与位宽，反映数据如何存放与流动）")
     ex_text = "\n".join(plain(l) for l in ex_lines)
     if ex_text and not re.search(r"(摘自原文|论文自带|自构|自设|示例取值|示例数据)", ex_text):
         warn("「六.示例说明」应注明示例来源（论文自带须注明摘自原文；自构建议标注「示例取值」）")
+
+    # ---------- 8c. 参考文献 ----------
+    # 条目行以 [N] 开头，独立成段；正文引用编号与条目一一对应；条目与论文全文比对疑似照录
+    ref_line_idx, inside_ref = set(), False
+    for i, l in enumerate(lines):
+        if H2_RE.match(l):
+            inside_ref = norm_sec(H2_RE.match(l).group(1)).startswith("参考文献")
+        elif inside_ref:
+            ref_line_idx.add(i)
+    idx_concl = next((k for k, h in enumerate(h2s)
+                      if norm_sec(h).startswith("总结")), None)
+    idx_ref = next((k for k, h in enumerate(h2s) if h.startswith("参考文献")), None)
+    idx_app = next((k for k, h in enumerate(h2s) if h.startswith("附录")), None)
+    if None not in (idx_concl, idx_ref, idx_app) and not idx_concl < idx_ref < idx_app:
+        err(f"「参考文献」应位于「八.总结」之后、「附录」之前，当前文档顺序：{' → '.join(h2s)}")
+
+    entries: dict[int, str] = {}
+    for i in sorted(ref_line_idx):
+        m = re.match(r"^\[(\d{1,3})\]\s*(\S.*)$", lines[i].strip())
+        if m:
+            entries[int(m.group(1))] = m.group(2)
+    if ref_line_idx and not entries:
+        err("「参考文献」没有任何形如「[N] 原文条目」的条目（编号沿用原文引用编号，逐字照录原文 References）")
+
+    def expand_cited(s: str) -> list[int]:
+        """'[46]'、'[21, 46]'、'[21-24]' 展开成引用编号列表。"""
+        out = []
+        for part in re.split(r"[,，、]", s):
+            part = part.strip()
+            if re.fullmatch(r"\d{1,3}", part):
+                out.append(int(part))
+            elif m := re.fullmatch(r"(\d{1,3})\s*[-–—~]\s*(\d{1,3})", part):
+                a, b = int(m.group(1)), int(m.group(2))
+                if a <= b <= a + 60:
+                    out.extend(range(a, b + 1))
+        return out
+
+    body_cited = set()
+    for i, l in enumerate(lines):
+        if i in ref_line_idx:
+            continue
+        for m in re.finditer(r"\[([\d\s,,，、\-–—~]+)\]", plain(l)):
+            body_cited.update(expand_cited(m.group(1)))
+    for n in sorted(body_cited - set(entries)):
+        err(f"正文引用 [{n}] 在「参考文献」中缺少对应条目")
+    for n in sorted(set(entries) - body_cited):
+        warn(f"参考文献条目 [{n}] 未在正文中被引用")
+    # 条目与论文全文做词汇级比对（豁免数字溯源，专查逐字照录）
+    if src_text and entries:
+        src_tokens = set(re.findall(r"[a-z0-9]+", re.sub(r"(?<=\d),\s?(?=\d{3}\b)", "", src_text).lower()))
+        for n, txt in sorted(entries.items()):
+            toks = [t for t in re.findall(r"[a-z0-9]+", txt.lower()) if len(t) >= 5]
+            if not toks:
+                continue
+            hit = sum(1 for t in toks if t in src_tokens)
+            if hit / len(toks) < 0.6:
+                warn(f"参考文献 [{n}] 与论文全文词汇匹配度低（{hit}/{len(toks)}），"
+                     f"请核对是否逐字照录原文 References")
 
     # ---------- 9. 术语首现解释（自洽性） ----------
     # 英文术语/缩写第一次出现时，同句应有中文解释。认可的"已解释"线索：
@@ -275,7 +355,7 @@ def check(md_path: Path, extract: Path | None):
     first_seen = {}
     for i, l in enumerate(lines):
         s = URL_RE.sub("", plain(l.strip()))
-        if not s or s.startswith(("!", "|", ">", "#", "图", "表")) or LIST_RE.match(s):
+        if not s or s.startswith(("!", "|", ">", "#", "图", "表", "[")) or LIST_RE.match(s):
             continue
         for m in TERM_RE.finditer(s):
             term = m.group(0)
@@ -315,7 +395,8 @@ def check(md_path: Path, extract: Path | None):
         src = strip_k(src_text)
         src_nums = set(m.group(1) for m in NUM_RE.finditer(src))
         src_nums |= set(re.findall(r"\d+(?:\.\d+)?", src))
-        # 示例说明章的自构数值不参与溯源（要求文中标注「示例取值」）
+        # 示例说明章的自构数值不参与溯源（要求文中标注「示例取值」）；
+        # 参考文献条目年份/页码等由 8c 的照录比对专查，同样不参与数字溯源
         ex_line_idx, inside_ex = set(), False
         for i, l in enumerate(lines):
             if H2_RE.match(l):
@@ -324,7 +405,7 @@ def check(md_path: Path, extract: Path | None):
                 ex_line_idx.add(i)
         missing = {}
         for i, l in enumerate(lines):
-            if i in ex_line_idx:
+            if i in ex_line_idx or i in ref_line_idx:
                 continue
             s = URL_RE.sub("", plain(l.strip()))
             if not s or s.startswith(("!", "|", ">", "#", "图", "表")):

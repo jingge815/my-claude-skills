@@ -12,6 +12,7 @@
   表N 题目         居中表题（表格上一行）
   | a | b |        GFM 表格，Table Grid 样式，表头加粗浅灰底
   1. / - 条目      列表条目（附录等），悬挂缩进
+  [N] 原文条目     参考文献条目，五号、悬挂缩进
   > 引用           灰色引用块
   **加粗**         行内加粗
 """
@@ -39,6 +40,7 @@ GRAY = RGBColor(0x59, 0x59, 0x59)
 
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 IMG_RE = re.compile(r"^!\[[^\]]*\]\(([^)]+)\)\s*$")
+REF_RE = re.compile(r"^\[\d+\]\s*\S")
 FIG_CAP_RE = re.compile(r"^图\s*\d+")
 TAB_CAP_RE = re.compile(r"^表\s*\d+")
 # 题注在 md 里用 <p align="center">…</p> 居中；转 docx 前剥离（docx 用段落对齐实现居中）
@@ -236,6 +238,13 @@ def build(md_path: Path, out: Path):
             p.paragraph_format.line_spacing = 1.4
             p.paragraph_format.space_after = Pt(4)
             add_rich(p, s, 12)
+        elif REF_RE.match(s):                                              # 参考文献条目：五号、悬挂缩进
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(0.85)
+            p.paragraph_format.first_line_indent = Cm(-0.85)
+            p.paragraph_format.line_spacing = 1.3
+            p.paragraph_format.space_after = Pt(3)
+            add_rich(p, s, 10.5)
         else:                                                              # 正文段落
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
