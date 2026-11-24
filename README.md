@@ -36,8 +36,8 @@ dev-flow/flow.py 一键确定性执行器（门禁+心跳+状态+决策日志+wo
 |------|------|----------|--------|
 | requirement-doc | 原始描述→规范需求文档（入口先 sharpen 锐化；复杂需求可先 arena 多候选） | "把这个想法整理成需求文档" | 上游 dev-flow/sharpen/arena；下游 tech-design-doc |
 | tech-design-doc | 需求文档→可落地设计（强制 ≥2 套候选形态对比；产出任务拆分与依赖 DAG） | "根据需求文档生成技术设计" | 上游 requirement-doc；下游 tdd-implement |
-| tdd-implement | 设计→TDD 代码实施 + 评审问题修复（偏差自主性三级；昂贵测试例外通道；任务级 worktree；DAG 并行） | "按设计文档开始开发""按评审文档改一改" | 上游 tech-design-doc / code-review-doc；下游 code-review-doc |
-| code-review-doc | 三份文档为基准的合规性评审（只评审不改代码） | "评审一下这次改动" | 上游 tdd-implement；下游 tdd-implement 阶段五 |
+| tdd-implement | 设计→TDD 代码实施 + 评审问题修复（偏差自主性三级；代码量六条硬约束；昂贵测试例外通道；任务级 worktree；DAG 并行） | "按设计文档开始开发""按评审文档改一改" | 上游 tech-design-doc / code-review-doc；下游 code-review-doc |
+| code-review-doc | 三份文档为基准的合规性评审（含代码量六条硬约束；只评审不改代码） | "评审一下这次改动" | 上游 tdd-implement；下游 tdd-implement 阶段五 |
 | review-fix-loop | 评审↔修复自动迭代程序（loop.py，可配 interrogate 对抗阶段与 techdoc 收尾） | `python3 loop.py` | 上游 code-review-doc/tdd-implement；下游 techdoc |
 | techdoc | 最终交付技术文档（只读代码不改代码） | "写一份最终技术文档" | 上游全流程 |
 
