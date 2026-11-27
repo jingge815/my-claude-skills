@@ -22,15 +22,23 @@ SPOKEN_EN = re.compile(
     r"[一-鿿]\s*(the|and|of|with|for|to|in|is|are|we|our|can|will|that|this|from|by|not|but)\b"
     r"[\s,,.:：、，。；;]", re.IGNORECASE)
 NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?![A-Za-z0-9_])")
+# 颜色表述硬规则：「红是什么」不合格，必须「红色/红色区域」
+COLOR_BARE_RE = re.compile(r"[红橙黄绿蓝紫青灰粉白黑](?=[是代表即即为])")
+URL_RE = re.compile(r"https?://|arxiv\.org|doi\.org|\b10\.\d{4,}|www\.")
+HEADING_LIST_RE = re.compile(r"启发[两三四1234]条|启发如下|启发有以下")
+LINK_WORD_RE = re.compile(r"下一步|作为.{0,8}输入|交给|送到|传递给|得到.{0,10}再")
+CHART_MARK_RE = re.compile(r"横轴|纵轴|横坐标|纵坐标")
+METRIC_DIR_RE = re.compile(r"越大越好|越小越好|越高越好|越低越好|越长越好|越短越好|越多越好|越少越好")
+SELF_INSIGHT_RE = re.compile(r"通过这次阅读|给我的启发|我的启发|读.{0,6}启发")
 FILLER = ("卡住", "对症", "说白了", "所以呢", "说白", "咱们", "呃，", "嗯，", "那个那个")
 SECTIONS = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
             "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
-NARRATION_MAX = 3000   # 15 分钟 × 200 字/分钟
-NARRATION_MIN = 2400
-NARRATION_TARGET_MIN = 2600
-COVER_MAX = 120
-PAGE_MIN, PAGE_MAX = 150, 480
-MIN_PAGES, MAX_PAGES = 13, 17
+NARRATION_MAX = 7000   # 30 分钟 × 200 字/分钟（讲清优先，不做压缩）
+NARRATION_MIN = 5000
+NARRATION_TARGET_MIN = 5500
+COVER_MAX = 160        # 封面/参考文献/结束页等短页上限
+PAGE_MIN, PAGE_MAX = 200, 560
+MIN_PAGES, MAX_PAGES = 18, 26
 
 errors: list[str] = []
 warns: list[str] = []
@@ -121,11 +129,32 @@ def check(md_path: Path, extract: Path | None):
                 err(f"第{num}页示例说明旁白没有出现「示例/例子」——旁白要带着听众逐步推演")
             if "图" not in body:
                 err(f"第{num}页示例说明旁白没有讲到图——流程图要逐步指着讲")
+            if not LINK_WORD_RE.search(body):
+                err(f"第{num}页示例旁白没有步骤衔接——每步要说清输出如何成为下一步的输入"
+                    f"（「作为下一步的输入/交给/送到」等）")
+        if title.startswith("四."):
+            body = "".join(plain(p) for p in paras)
+            if not re.search(r"分为|分成|两类|三类|四类|几类|一类", body):
+                err(f"第{num}页现状旁白没有总起分类（「已有研究分为N类…」）")
+            if "原理" not in body or "不足" not in body:
+                err(f"第{num}页现状旁白没有按「每类原理→由原理推出的不足」讲")
+        if title.startswith("八."):
+            body = "".join(plain(p) for p in paras)
+            if HEADING_LIST_RE.search(body):
+                err(f"第{num}页总结旁白用了「启发N条/启发如下」列举式开头——"
+                    f"必须第一人称感受式（「通过这次阅读，我的启发是…」）")
+            if "启发" in body and not SELF_INSIGHT_RE.search(body):
+                err(f"第{num}页总结旁白讲启发但没用第一人称感受式"
+                    f"（「通过这次阅读，给我的启发是…」）")
+        if title.startswith("参考文献") or "参考文献" in title:
+            body = "".join(plain(p) for p in paras)
+            if len([s for s in re.split(r"[。！？]", body) if s.strip()]) > 2:
+                err(f"第{num}页参考文献旁白超过 2 句——只说「下面是论文的相关参考文献」即可，不逐条念")
 
     # ---------- 3. 总字数 ----------
     print(f"[check] 旁白总字数 {total} 字（约 {total/200.0:.1f} 分钟）")
     if total > NARRATION_MAX:
-        err(f"旁白总字数 {total} 字超过 {NARRATION_MAX} 字（15 分钟讲不完），必须删减")
+        err(f"旁白总字数 {total} 字超过 {NARRATION_MAX} 字（30 分钟上限），必须删减")
     elif total < NARRATION_MIN:
         err(f"旁白总字数 {total} 字少于 {NARRATION_MIN} 字，内容太薄")
     elif total < NARRATION_TARGET_MIN:
@@ -146,6 +175,34 @@ def check(md_path: Path, extract: Path | None):
             warn(f"第{i+1}行: 疑似中英混排，除专有名词外应使用中文: {s[:36]}")
         if re.search(r"[一-鿿]\s*[,;]\s*[一-鿿]", s):
             warn(f"第{i+1}行: 中文语句中使用了半角标点: {s[:36]}")
+
+    # ---------- 4.5 表达规范：色词、网址、电报式省略 ----------
+    for i, l in enumerate(lines):
+        raw = l.strip()
+        if not raw or raw.startswith(("#", "**", ">")):
+            continue
+        s = plain(raw)
+        m = COLOR_BARE_RE.search(s)
+        if m:
+            errors.append(f"第{i+1}行: 「{m.group(0)}」缺「色」——颜色表述必须说「红色区域/蓝色柱」"
+                          f"等完整说法: {s[:36]}")
+        if URL_RE.search(s):
+            errors.append(f"第{i+1}行: 旁白念了网址/DOI——网址只放页面上，解说词不念: {s[:36]}")
+    for pno, (i, num, title) in sorted(idx_of.items()):
+        paras = page_paras(lines, i)
+        body = "".join(plain(p) for p in paras)
+        if len(body) < 100:
+            continue
+        sents = [s for s in re.split(r"[。！？]", body) if len(s.strip()) >= 2]
+        if sents:
+            short = sum(1 for s in sents if len(s.strip()) < 9)
+            if short / len(sents) > 0.2:
+                warns.append(f"第{num}页「{title}」超短句占比 {short}/{len(sents)}"
+                             f"——旁白像电报，要把句子捋顺（「橙是X」→「橙色区域是X」）")
+        if CHART_MARK_RE.search(body) and not METRIC_DIR_RE.search(body) \
+                and not re.search(r"对比|比较|对照", body):
+            warns.append(f"第{num}页「{title}」讲了轴但没说指标方向/比对对象"
+                         f"（越大越好还是越小越好？比哪些方法？）")
 
     # ---------- 5. 数字溯源 ----------
     if src_text:

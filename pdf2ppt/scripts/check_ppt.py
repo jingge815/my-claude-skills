@@ -23,7 +23,7 @@ CM = 360000
 SECTION_ORDER = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
                  "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
 # 各节最少页数：方法要原理+步骤，示例说明至少 1 页，实验要主结果+分析
-SECTION_MIN_PAGES = {"五.本文研究方法": 2, "六.示例说明": 1, "七.实验结果": 2}
+SECTION_MIN_PAGES = {"五.本文研究方法": 3, "六.示例说明": 2, "七.实验结果": 3}
 MAX_EXAMPLE_PAGES = 2   # 示例说明最多 2 页，多了挤占正片时长
 KIND_WITH_SUMMARY = ("text-left", "figure-left")
 # 模板槽位形状名：这些之外的形状都算「图」的组成部分
@@ -35,7 +35,7 @@ PLACEHOLDER_RESIDUE = ("（楷体", "（微软雅黑", "（等线", "xxx", "Xxx"
 THANKS_REQUIRED = "感谢聆听"
 THANKS_FORBIDDEN = ("批评指正", "欢迎指正", "谢谢大家", "敬请指正")
 RED_HEX = "C00000"
-MIN_PAGES, MAX_PAGES = 13, 17
+MIN_PAGES, MAX_PAGES = 18, 26
 # 嵌入原图的有效 DPI 下限（figure-spec：≥110 直接用；95–110 偏软须注明；<95 不许硬嵌）
 DPI_HARD = 95.0
 DPI_SOFT = 110.0
@@ -345,11 +345,11 @@ def check(pptx_path: Path, content: dict):
 
     # ---------- 旁白总量（以 content.json 为准） ----------
     total = sum(len(narr(i)) for i in range(1, len(pages) + 1))
-    print(f"[check] 旁白总字数 {total} 字（约 {total/200.0:.1f} 分钟，上限 15 分钟）")
-    if total > 3000:
-        err(f"旁白总字数 {total} 超过 3000 字（15 分钟讲不完）")
-    elif total < 2400:
-        err(f"旁白总字数 {total} 少于 2400 字，内容太薄")
+    print(f"[check] 旁白总字数 {total} 字（约 {total/200.0:.1f} 分钟，硬上限 7000 字）")
+    if total > 7000:
+        err(f"旁白总字数 {total} 超过 7000 字（30 分钟硬上限，目标 5500–6500）")
+    elif total < 5000:
+        err(f"旁白总字数 {total} 少于 5000 字，内容太薄（目标 5500–6500）")
 
 
 def main():

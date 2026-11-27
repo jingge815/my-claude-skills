@@ -1,0 +1,52 @@
+# pdf2video 模板配置（固化项：背景音乐、主播音、音量、字幕字体、封面模板）
+# 长期调整：复制本文件为 config.toml（已被 .gitignore 忽略，不进仓库）。
+# 单次微调：把改好的 toml 放任意路径，脚本传 --config 指向它。
+
+[voice]                      # 主播音：女声
+backend = "cosyvoice"           # cosyvoice=本地 CosyVoice2（最自然，CPU 慢些）/ edge=联网 edge-tts
+name = "zh-CN-XiaoxiaoNeural"   # edge 后端的音色；换活泼风用 zh-CN-XiaoyiNeural
+rate = "-8%"                    # edge 后端：稍慢更自然，太快就是"AI 味"
+pitch = "+2Hz"
+volume = "+0%"
+[voice.cosy]
+model_dir = ""                  # CosyVoice2 模型目录（真实路径只写 config.toml；留空自动发现）
+speaker = "中文女"               # sft 模式内置说话人；cross 模式留空走克隆
+prompt_voice = "zh-CN-XiaoyiNeural"  # 克隆提示音（用户选定 cosy2_xiaoyi 晓伊版）
+speed = 1.0
+threads = 96
+
+[bgm]                        # 背景音乐：固定配方确定性生成（每次同一首）
+path = ""                       # 填自备音乐路径（mp3/wav）则不再生成
+seed = 20260914                 # 配方种子；同种子同音乐
+bpm = 72                        # 轻快但慢速，像咖啡馆背景乐
+loop_minutes = 1.0              # 循环段时长（分钟），无缝循环
+gain_db = -15.0                 # 相对人声的混音电平（明显可闻；人声窗口被闪避压住不抢）
+duck_db = -9.0                  # 有人声时侧链再压低的量
+
+[mix]
+narration_gain_db = 0.0         # 人声增益（听不清就 +2~4）
+limiter = 0.95                  # 限幅阈值，防削波
+
+[subtitle]                   # 解说旁白字幕
+font = "Noto Sans CJK SC"
+size = 15                       # ASS 相对字号（1080p）
+primary = "&H00FFFFFF&"         # 白字（BGR）
+outline = "&H00202020&"         # 深描边
+margin_v = 30                   # 距底部像素
+max_chars = 18                  # 每条字幕字数上限
+
+[video]
+fps = 30
+crf = 18                        # 质量（越小越清晰越大）
+preset = "veryfast"
+lead_in = 0.8                   # 每页旁白前留白（光标入场）
+lead_out = 1.3                  # 每页旁白后留白（收尾）
+fade = 0.5                      # 页间黑场淡入淡出单边时长
+zoom_min_sec = 4.0              # 讲图时长超过它才做局部放大
+
+[cover]                      # 封面模板（B 站风格，左文右图）
+badge = "论文解读"               # 徽章文案（自动追加 "· N分钟"）
+bg = "deep"                     # deep=深蓝科技 / light=浅色清新
+accent = "#FFD54A"              # 高亮标记色（B 站黄）
+duration_sec = 4.5              # 开场封面最短停留秒数
+opening_line = "今天用几分钟，带大家读懂这篇论文。"   # 开场白（TTS+字幕）

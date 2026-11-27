@@ -102,9 +102,9 @@ def summary_char_limit(page):
     if page.get("kind") in ("text-left", "figure-left"):
         return TEMPLATE_SUMMARY_CHARS
     return MAX_SUMMARY_CHARS
-# 15 分钟演讲：按每分钟 200 字折算 13–15 分钟
-NARRATION_MIN = 2600
-NARRATION_MAX = 3000
+# 30 分钟演讲：按每分钟 200 字折算 25–30 分钟，目标 5500–6500，硬上限 7000
+NARRATION_MIN = 5000
+NARRATION_MAX = 7000
 BODY_PT_DEFAULT = 16
 BODY_PT_MIN = 12
 BODY_PT_MAX = 18
@@ -1496,14 +1496,13 @@ def prepare_figure(page, index, media_dir):
 def write_narration(pages, narr, path, doc_title=None):
     """逐页旁白稿 md。格式与 build_docx.py 的方言一一对应：
     `# ` 文档标题、`## ` 各页、正文段以两个全角空格开头，可直接转 docx。"""
-    total = 0
+    total = sum(len(narr(i) or "") for i in range(1, len(pages) + 1))
     lines = ["# %s——论文总结PPT旁白稿" % (doc_title or "论文"),
              "",
-             "> 共 %d 页（含封面与结束页）；按每分钟 200 字折算，须在 15 分钟内讲完。" % len(pages),
+             "> 共 %d 页（含封面与结束页）；按每分钟 200 字折算，约 %d 分钟讲完。" % (len(pages), round(total / 200.0)),
              ""]
     for i, page in enumerate(pages, start=1):
         text = narr(i)
-        total += len(text)
         if page.get("kind") == "cover":
             head = "封面"
         elif page.get("kind") == "closing":
@@ -1528,8 +1527,8 @@ def write_narration(pages, narr, path, doc_title=None):
 SECTION_ORDER = ["一.论文概述", "二.研究背景", "三.研究问题", "四.传统研究现状",
                  "五.本文研究方法", "六.示例说明", "七.实验结果", "八.总结"]
 # 各节最少页数：方法要有原理页 + 步骤页，示例说明至少 1 页，实验要主结果 + 分析
-SECTION_MIN_PAGES = {"五.本文研究方法": 2, "六.示例说明": 1, "七.实验结果": 2}
-MIN_PAGES, MAX_PAGES = 13, 17
+SECTION_MIN_PAGES = {"五.本文研究方法": 3, "六.示例说明": 2, "七.实验结果": 3}
+MIN_PAGES, MAX_PAGES = 18, 26
 REFS_MAX_ENTRIES = 10   # 参考文献页最多 10 条（只列 PPT 里引用过的）
 
 
@@ -1654,7 +1653,7 @@ def check_structure(pages):
         out.append("参考文献页应紧邻结束页之前（倒数第二页），当前不在该位置")
     titles = [p.get("title") or "" for p in pages[1:-1] if p.get("kind") in KIND_SLOTS]
     if len(pages) < MIN_PAGES or len(pages) > MAX_PAGES:
-        out.append("总页数 %d，应在 %d–%d 页（15 分钟讲不完更多页）" % (len(pages), MIN_PAGES, MAX_PAGES))
+        out.append("总页数 %d，应在 %d–%d 页（30 分钟讲不完更多页）" % (len(pages), MIN_PAGES, MAX_PAGES))
     # 章节前缀按序出现；允许一个标题只覆盖一节，同节连续多页
     seq = []
     for t in titles:

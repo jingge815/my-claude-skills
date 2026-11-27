@@ -9,7 +9,10 @@
 
 1. **原文有现成图 → 直接用**：`extract/figures/` 里的裁剪 PNG（fig/tab 前缀）。
    把要用的复制到工作目录 `figs/`，在 `content.json` 里写 `"figs/fig5.png"` 或
-   `{"type": "image", "path": "figs/fig5.png", "caption": "摘自原文 Figure 5：一句话说明这张图表达什么"}`。
+   `{"type": "image", "path": "figs/fig5.png", "caption": "摘自原文 Figure 5：一句话说明这张图表达什么"}`；
+   每张入选图登记**结构化字段**：`ref`（原文编号 "Figure 5"）、`brief`（这张图总体
+   干什么）、`axes`（横轴/纵轴/图例/指标方向，越大越好还是越小越好）——给视频端
+   精确指图与五步讲解用；自绘图（flow/cards/table）同样写 brief/axes（axes 写结构说明）。
    嵌入时脚本会**自动裁掉图的近白边缘**，并**按图自身比例在图槽内放大到贴边**
    （宽图占满槽宽、高图占满槽高，不再垫白底画布）——所以只需关心图本身内容是否清楚。
 2. **原图太小/只是表格截图 → 按原结构重排**：表格行数 ≤5 时用 `table` 重排
